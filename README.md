@@ -113,11 +113,9 @@ Follow these steps to set up and run your own ArthaChain nodes.
 
    If you're using Git, open your terminal or command prompt and run:
 
-git clone https://github.com/your-username/ArthaChain.git
+git clone https://github.com/muhammadzili/ArthaChain.git
 cd ArthaChain
 
-
-*(Replace `your-username` with your actual GitHub username once you've forked/uploaded the project.)*
 
 Alternatively, you can download all the Python files directly from the GitHub repository and place them into a new folder named `ArthaChain` on your computer.
 
