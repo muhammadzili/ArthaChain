@@ -28,7 +28,7 @@ def setup_logging(app_name):
             root_logger.removeHandler(handler)
 
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.INFO) # Keep INFO for miner output
     formatter_console = logging.Formatter('%(levelname)s: %(message)s')
     console_handler.setFormatter(formatter_console)
     root_logger.addHandler(console_handler)
@@ -42,28 +42,44 @@ def setup_logging(app_name):
     logging.info(f"Logging configured. Console: INFO+, File ('{log_file_path}'): DEBUG+")
 
 
-def proof_of_work(last_block_hash, difficulty, blockchain_instance, node_instance):
+def proof_of_work(last_block, blockchain_instance, node_instance):
+    """
+    Simple Proof of Work algorithm:
+    - Find a number 'nonce' such that hashing (last_block_hash + nonce) meets the difficulty target.
+    """
+    # Ensure last_block is not None before proceeding
+    if last_block is None:
+        logging.error("proof_of_work received a None last_block. Cannot proceed.")
+        return None
+
+    last_block_hash = blockchain_instance.hash_block(last_block)
+    difficulty = blockchain_instance.get_current_difficulty()
     nonce = 0
     start_time = time.time()
-    logging.info(f"Starting Proof of Work. Target difficulty: {hex(difficulty)}")
+    logging.info(f"Starting Proof of Work with difficulty: {hex(difficulty)}")
 
     while not blockchain_instance.is_valid_proof(last_block_hash, nonce, difficulty):
         nonce += 1
-
+        
         if nonce % 100000 == 0:
             node_instance.sync_blockchain_from_known_peers()
-            if blockchain_instance.last_block['hash'] != last_block_hash:
-                logging.info("Chain updated by peer during mining. Restarting PoW...")
-                return None
+            
+            # Check if the chain has changed while mining (another block was found)
+            if blockchain_instance.last_block and blockchain_instance.last_block['index'] != last_block['index']:
+                logging.info("New block received from network while mining. Stopping current PoW and restarting search.")
+                return None # Indicate that mining should stop and restart from fresh block
 
-            logging.debug(f"  Nonce tried: {nonce}. Time: {time.time() - start_time:.2f}s")
-
+            logging.debug(f"  Miner working... tried {nonce} nonces. Time elapsed: {time.time() - start_time:.2f}s")
+            
     end_time = time.time()
-    logging.info(f"✅ Proof of Work found! Nonce: {nonce} in {end_time - start_time:.2f} sec")
+    logging.info(f"Proof of Work found: {nonce} (took {end_time - start_time:.2f} seconds)")
     return nonce
 
 
 def run_miner():
+    """
+    Main function to run the ArthaChain miner.
+    """
     setup_logging("artha_miner")
 
     wallet = ArthaWallet()
@@ -75,44 +91,65 @@ def run_miner():
     logging.info("\n" + "="*40)
     logging.info("      ARTHACHAIN MINER STARTED")
     logging.info("="*40)
+    logging.info(f"Miner Address: {miner_address}")
+    logging.info(f"Miner Node Running at: {MINER_HOST}:{MINER_PORT}")
+    logging.info(f"Difficulty Adjustment Interval: {blockchain.DIFFICULTY_ADJUSTMENT_INTERVAL} blocks")
+    logging.info(f"Target Block Time: {blockchain.TARGET_BLOCK_TIME_SECONDS} seconds")
+    logging.info("Waiting for peers to synchronize blockchain...")
 
-    time.sleep(5)
+    time.sleep(10)
+
+    logging.info("\nStarting Proof of Work mining process...")
 
     try:
         while True:
             last_block = blockchain.last_block
+            
+            # --- Ensure last_block is not None before proceeding ---
+            # This handles cases where chain might be empty before genesis is properly established/synced
             if last_block is None:
-                logging.warning("Waiting for genesis block...")
-                time.sleep(3)
+                logging.warning("Blockchain is empty. Waiting for genesis block to be created or synced.")
+                time.sleep(5)
                 continue
 
-            previous_hash = blockchain.hash_block(last_block)
-            difficulty = last_block['difficulty']
-            if (last_block['index'] + 1) % blockchain.DIFFICULTY_ADJUSTMENT_INTERVAL == 0:
-                difficulty = blockchain.calculate_difficulty(last_block, blockchain.chain)
+            # CRITICAL FIX: Ensure previous_hash is calculated from the *actual* last_block object
+            previous_hash_for_new_block = blockchain.hash_block(last_block)
 
-            logging.info(f"\nMining block #{last_block['index'] + 1} at difficulty: {hex(difficulty)}")
 
-            nonce = proof_of_work(previous_hash, difficulty, blockchain, node)
+            logging.info(f"\nLast block: #{last_block['index']} (Hash: {previous_hash_for_new_block[:10]}...)")
+            logging.info(f"Current Difficulty Target: {hex(blockchain.get_current_difficulty())}")
+            logging.info(f"Pending transactions: {len(blockchain.pending_transactions)}")
+
+            nonce = proof_of_work(last_block, blockchain, node) 
+            
             if nonce is None:
-                continue
+                continue 
 
+            # CRITICAL CHECK: After finding PoW, *re-sync* and *re-check* if the chain has changed.
+            # If the chain has grown/forked while we were mining, our found PoW is for an outdated block.
             node.sync_blockchain_from_known_peers()
-            if blockchain.last_block['hash'] != previous_hash:
-                logging.info("Chain updated by peer after PoW. Discarding block.")
-                continue
+            
+            # Check if the blockchain's last block has changed *after* our PoW was found.
+            # Compare the hash of the block we *started* mining on (`previous_hash_for_new_block`)
+            # with the hash of the current last block in the blockchain.
+            if blockchain.hash_block(blockchain.last_block) != previous_hash_for_new_block:
+                logging.info("Blockchain updated by another peer while PoW was found. Discarding our found PoW and restarting mining.")
+                continue # Restart mining loop
 
-            new_block = blockchain.new_block(nonce, previous_hash, miner_address, difficulty)
+            # If we reached here, our PoW is valid for the current chain tip.
+            new_block = blockchain.new_block(nonce, previous_hash_for_new_block, miner_address) # Use previous_hash_for_new_block here
+            
             if new_block:
-                logging.info(f"✅ Block #{new_block['index']} mined and added!")
+                logging.info(f"Block #{new_block['index']} successfully mined and added!")
                 node.broadcast_message('NEW_BLOCK', {'block': new_block})
+                node.last_block_broadcast_time = time.time()
             else:
-                logging.warning("❌ Failed to add block.")
+                logging.warning("Failed to add new block (perhaps supply limit reached or chain inconsistency).")
 
             time.sleep(1)
 
     except KeyboardInterrupt:
-        logging.info("Miner stopped by user.")
+        logging.info("\nMiner stopped by user.")
     finally:
         node.stop()
 
