@@ -172,4 +172,3 @@ if __name__ == '__main__':
             print(f"Port error: {e}. Using default port {APP_PORT}.")
 
     run_app()
-
