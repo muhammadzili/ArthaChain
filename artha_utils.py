@@ -37,7 +37,8 @@ def save_json_file(filename, data):
     filepath = os.path.join(get_data_dir(), filename)
     with open(filepath, 'w') as f:
         json.dump(data, f, indent=4)
-    print(f"File '{filename}' successfully saved in {get_data_dir()}")
+    # Changed to debug level to reduce clutter
+    logging.debug(f"File '{filename}' successfully saved in {get_data_dir()}") 
 
 def load_json_file(filename):
     """
