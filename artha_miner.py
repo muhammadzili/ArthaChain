@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import sys
+import getpass # Untuk meminta password secara aman
 from artha_blockchain import ArthaBlockchain
 from artha_wallet import ArthaWallet
 from artha_node import ArthaNode
@@ -44,112 +45,121 @@ def setup_logging(app_name):
 
 def proof_of_work(last_block, blockchain_instance, node_instance):
     """
-    Simple Proof of Work algorithm:
-    - Find a number 'nonce' such that hashing (last_block_hash + nonce) meets the difficulty target.
+    Algoritma Proof of Work:
+    - Menemukan 'nonce' sehingga hash dari (hash_blok_terakhir + nonce) memenuhi target kesulitan.
     """
-    # Ensure last_block is not None before proceeding
     if last_block is None:
-        logging.error("proof_of_work received a None last_block. Cannot proceed.")
+        logging.error("proof_of_work menerima last_block yang None. Tidak bisa melanjutkan.")
         return None
 
     last_block_hash = blockchain_instance.hash_block(last_block)
     difficulty = blockchain_instance.get_current_difficulty()
     nonce = 0
     start_time = time.time()
-    logging.info(f"Starting Proof of Work with difficulty: {hex(difficulty)}")
+    
+    # Check if another node has already found a block while we were setting up
+    if blockchain_instance.last_block['index'] != last_block['index']:
+        logging.info("Rantai telah diperbarui sebelum PoW dimulai. Memulai ulang pencarian.")
+        return None
+
+    logging.info(f"Memulai Proof of Work untuk blok #{last_block['index'] + 1} dengan kesulitan: {hex(difficulty)}")
 
     while not blockchain_instance.is_valid_proof(last_block_hash, nonce, difficulty):
         nonce += 1
         
+        # Setiap 100,000 nonce, periksa apakah ada blok baru dari jaringan
         if nonce % 100000 == 0:
-            node_instance.sync_blockchain_from_known_peers()
-            
-            # Check if the chain has changed while mining (another block was found)
-            if blockchain_instance.last_block and blockchain_instance.last_block['index'] != last_block['index']:
-                logging.info("New block received from network while mining. Stopping current PoW and restarting search.")
-                return None # Indicate that mining should stop and restart from fresh block
+            # Periksa apakah rantai telah berubah saat menambang (blok lain ditemukan)
+            if blockchain_instance.last_block['index'] != last_block['index']:
+                logging.info("Blok baru diterima dari jaringan saat menambang. Menghentikan PoW saat ini.")
+                return None # Mengindikasikan bahwa penambangan harus dihentikan dan dimulai ulang
 
-            logging.debug(f"  Miner working... tried {nonce} nonces. Time elapsed: {time.time() - start_time:.2f}s")
+            logging.debug(f"  Penambang bekerja... mencoba {nonce} nonces. Waktu berlalu: {time.time() - start_time:.2f}s")
             
     end_time = time.time()
-    logging.info(f"Proof of Work found: {nonce} (took {end_time - start_time:.2f} seconds)")
+    logging.info(f"Proof of Work ditemukan: {nonce} (membutuhkan {end_time - start_time:.2f} detik)")
     return nonce
 
 
 def run_miner():
     """
-    Main function to run the ArthaChain miner.
+    Fungsi utama untuk menjalankan penambang ArthaChain.
     """
     setup_logging("artha_miner")
 
-    wallet = ArthaWallet()
+    # --- PERUBAHAN KRITIS: Meminta password untuk membuka dompet miner ---
+    try:
+        password = getpass.getpass("Masukkan password untuk dompet Miner Anda: ")
+        if not password:
+            print("Password tidak boleh kosong. Keluar.")
+            return
+        wallet = ArthaWallet(password=password)
+    except ValueError as e:
+        print(f"Gagal memuat dompet miner: {e}")
+        return
+    except (ImportError, EOFError):
+        print("Gagal mengimpor 'getpass'. Harap jalankan di terminal yang mendukungnya.")
+        return
+
     miner_address = wallet.get_public_address()
     blockchain = ArthaBlockchain()
     node = ArthaNode(MINER_HOST, MINER_PORT, blockchain, is_miner=True)
     node.start()
 
     logging.info("\n" + "="*40)
-    logging.info("      ARTHACHAIN MINER STARTED")
+    logging.info("      PENAMBANG ARTHACHAIN DIMULAI")
     logging.info("="*40)
-    logging.info(f"Miner Address: {miner_address}")
-    logging.info(f"Miner Node Running at: {MINER_HOST}:{MINER_PORT}")
-    logging.info(f"Difficulty Adjustment Interval: {blockchain.DIFFICULTY_ADJUSTMENT_INTERVAL} blocks")
-    logging.info(f"Target Block Time: {blockchain.TARGET_BLOCK_TIME_SECONDS} seconds")
-    logging.info("Waiting for peers to synchronize blockchain...")
+    logging.info(f"Alamat Miner: {miner_address}")
+    logging.info(f"Node Miner Berjalan di: {MINER_HOST}:{MINER_PORT}")
+    logging.info("Menunggu peer untuk sinkronisasi blockchain...")
 
-    time.sleep(10)
+    time.sleep(10) # Beri waktu untuk sinkronisasi awal
 
-    logging.info("\nStarting Proof of Work mining process...")
+    logging.info("\nMemulai proses penambangan Proof of Work...")
 
     try:
         while True:
             last_block = blockchain.last_block
             
-            # --- Ensure last_block is not None before proceeding ---
-            # This handles cases where chain might be empty before genesis is properly established/synced
             if last_block is None:
-                logging.warning("Blockchain is empty. Waiting for genesis block to be created or synced.")
+                logging.warning("Blockchain kosong. Menunggu blok genesis dibuat atau disinkronkan.")
                 time.sleep(5)
                 continue
 
-            # CRITICAL FIX: Ensure previous_hash is calculated from the *actual* last_block object
             previous_hash_for_new_block = blockchain.hash_block(last_block)
 
-
-            logging.info(f"\nLast block: #{last_block['index']} (Hash: {previous_hash_for_new_block[:10]}...)")
-            logging.info(f"Current Difficulty Target: {hex(blockchain.get_current_difficulty())}")
-            logging.info(f"Pending transactions: {len(blockchain.pending_transactions)}")
+            logging.info(f"\nMenambang di atas blok: #{last_block['index']} (Hash: {previous_hash_for_new_block[:10]}...)")
+            logging.info(f"Kesulitan saat ini: {hex(blockchain.get_current_difficulty())}")
+            logging.info(f"Transaksi tertunda: {len(blockchain.pending_transactions)}")
 
             nonce = proof_of_work(last_block, blockchain, node) 
             
             if nonce is None:
+                logging.info("PoW dibatalkan atau gagal. Memulai ulang siklus penambangan...")
+                time.sleep(2) # Jeda singkat sebelum mencoba lagi
                 continue 
 
-            # CRITICAL CHECK: After finding PoW, *re-sync* and *re-check* if the chain has changed.
-            # If the chain has grown/forked while we were mining, our found PoW is for an outdated block.
-            node.sync_blockchain_from_known_peers()
-            
-            # Check if the blockchain's last block has changed *after* our PoW was found.
-            # Compare the hash of the block we *started* mining on (`previous_hash_for_new_block`)
-            # with the hash of the current last block in the blockchain.
+            # Pemeriksaan Kritis: Setelah menemukan PoW, periksa lagi apakah rantai telah berubah.
+            # Jika hash dari blok terakhir di rantai *tidak lagi sama* dengan hash yang kita gunakan untuk memulai,
+            # berarti orang lain telah menemukan blok lebih dulu.
             if blockchain.hash_block(blockchain.last_block) != previous_hash_for_new_block:
-                logging.info("Blockchain updated by another peer while PoW was found. Discarding our found PoW and restarting mining.")
-                continue # Restart mining loop
+                logging.warning("Rantai diperbarui oleh peer lain TEPAT saat PoW ditemukan. Membuang blok kita dan memulai ulang.")
+                continue
 
-            # If we reached here, our PoW is valid for the current chain tip.
-            new_block = blockchain.new_block(nonce, previous_hash_for_new_block, miner_address) # Use previous_hash_for_new_block here
+            # Jika kita sampai di sini, PoW kita valid untuk ujung rantai saat ini.
+            new_block = blockchain.new_block(nonce, previous_hash_for_new_block, miner_address)
             
             if new_block:
-                logging.info(f"Block #{new_block['index']} successfully mined and added!")
+                logging.info(f"Blok #{new_block['index']} berhasil ditambang dan ditambahkan!")
                 node.broadcast_message('NEW_BLOCK', {'block': new_block})
                 node.last_block_broadcast_time = time.time()
             else:
-                logging.warning("Failed to add new block (perhaps supply limit reached or chain inconsistency).")
+                logging.warning("Gagal menambahkan blok baru (mungkin batas pasokan tercapai).")
 
-            time.sleep(1)
+            time.sleep(1) # Jeda untuk mencegah penggunaan CPU 100% jika kesulitan sangat rendah
 
     except KeyboardInterrupt:
-        logging.info("\nMiner stopped by user.")
+        logging.info("\nPenambang dihentikan oleh pengguna.")
     finally:
         node.stop()
 
@@ -158,8 +168,8 @@ if __name__ == '__main__':
         try:
             MINER_PORT = int(sys.argv[1])
             if not (1024 <= MINER_PORT <= 65535):
-                raise ValueError("Port must be between 1024 and 65535.")
+                raise ValueError("Port harus antara 1024 dan 65535.")
         except ValueError as e:
-            logging.error(f"Port error: {e}. Using default port {MINER_PORT}.")
+            logging.error(f"Kesalahan port: {e}. Menggunakan port default {MINER_PORT}.")
     
     run_miner()
