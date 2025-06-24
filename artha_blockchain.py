@@ -1,7 +1,7 @@
 # artha_blockchain.py
 
 import time
-import hashlib # Make sure hashlib is imported for PoW
+import hashlib
 from artha_utils import hash_data, json_serialize, load_json_file, save_json_file
 from artha_wallet import ArthaWallet
 
@@ -33,7 +33,7 @@ class ArthaBlockchain:
             print("Blockchain file not found. Creating genesis block...")
             # For genesis block, we'll give it a starting difficulty.
             # A higher difficulty number means an easier target (fewer leading zeros required)
-            genesis_difficulty = 2**256 // (1000 * 1000) # Example starting difficulty
+            genesis_difficulty = 2**256 // (1000 * 1000) # Example starting difficulty, adjust as needed for initial speed
             self.create_genesis_block(genesis_difficulty)
             self.save_chain() # Save the genesis block
 
@@ -50,8 +50,6 @@ class ArthaBlockchain:
             'miner_address': 'genesis_address', # Miner address for the genesis block
             'difficulty': initial_difficulty # Starting difficulty
         }
-        # Calculate the actual hash for genesis block (even though proof is 0)
-        # We'll rehash it later when validating.
         self.chain.append(genesis_block)
         print("Genesis block created!")
 
@@ -113,7 +111,7 @@ class ArthaBlockchain:
             return False
 
         # Create dummy transaction_data for signature verification
-        # This must be identical to the data used during signing
+        # This must be identical to the data used when signing
         tx_data_for_verification = {
             'sender': sender,
             'recipient': recipient,
@@ -130,7 +128,7 @@ class ArthaBlockchain:
 
         transaction = {
             'sender': sender,
-            'recipient': amount, # Simplified: store amount directly here.
+            'recipient': recipient, # FIX: Changed from 'amount' to 'recipient'
             'amount': amount,
             'timestamp': time.time(),
             'signature': signature,
@@ -214,16 +212,20 @@ class ArthaBlockchain:
         # Adjust difficulty:
         # If actual_time_taken is too fast, increase difficulty (target hash becomes smaller)
         # If actual_time_taken is too slow, decrease difficulty (target hash becomes larger)
-        if actual_time_taken < expected_time / 2: # Too fast, make it much harder
-            new_difficulty = new_difficulty // 2 # Halve the target (double difficulty)
-        elif actual_time_taken > expected_time * 2: # Too slow, make it much easier
-            new_difficulty = new_difficulty * 2 # Double the target (halve difficulty)
-        elif actual_time_taken < expected_time: # A bit fast, make it slightly harder
-            new_difficulty = int(new_difficulty * 0.9)
-        elif actual_time_taken > expected_time: # A bit slow, make it slightly easier
-            new_difficulty = int(new_difficulty * 1.1)
+        # We want to multiply difficulty by expected_time / actual_time_taken
+        # For simplicity, we use factors of 0.9 and 1.1 for slight adjustments,
+        # and 0.5 (//2) and 2 for major adjustments.
+        if actual_time_taken < expected_time / 2: # Much faster than expected
+            new_difficulty = new_difficulty // 2 # Halve the target, i.e., double the actual difficulty
+        elif actual_time_taken > expected_time * 2: # Much slower than expected
+            new_difficulty = new_difficulty * 2 # Double the target, i.e., halve the actual difficulty
+        elif actual_time_taken < expected_time: # Slightly faster
+            new_difficulty = int(new_difficulty * 0.9) # Slightly increase difficulty
+        elif actual_time_taken > expected_time: # Slightly slower
+            new_difficulty = int(new_difficulty * 1.1) # Slightly decrease difficulty
         
-        # Ensure difficulty doesn't go below 1 (no division by zero) or above MAX_DIFFICULTY
+        # Ensure difficulty doesn't go below 1 (no division by zero or negative target)
+        # And ensure it doesn't exceed MAX_DIFFICULTY (target becomes too easy)
         new_difficulty = max(1, min(new_difficulty, self.MAX_DIFFICULTY))
 
         print(f"--- Difficulty Adjusted at block #{last_block['index']} ---")
@@ -237,19 +239,24 @@ class ArthaBlockchain:
         """
         Returns the current mining difficulty.
         """
+        # If blockchain is empty (e.g., first run before genesis block is created)
         if not self.chain:
-            # Should not happen after genesis block, but for safety
-            return self.MAX_DIFFICULTY // (1000 * 1000) # Default for genesis if not set
+            # Return a default starting difficulty. This is typically set during genesis block creation.
+            # This part should ideally only be hit before the genesis block is appended.
+            # The initial genesis_difficulty is passed to create_genesis_block.
+            return self.MAX_DIFFICULTY // (1000 * 1000) # This value should match initial_difficulty in create_genesis_block call.
 
         last_block = self.last_block
         
-        # Only recalculate difficulty at adjustment intervals
-        if (last_block['index'] % self.DIFFICULTY_ADJUSTMENT_INTERVAL == 0) and (last_block['index'] != 0):
-            # This means the difficulty stored in the *last_block* is the old one.
-            # We need to calculate the *new* difficulty for the *next* block.
+        # Check if it's time for difficulty adjustment and it's not the genesis block
+        if (last_block['index'] != 0) and (last_block['index'] % self.DIFFICULTY_ADJUSTMENT_INTERVAL == 0):
+            # This means the difficulty stored in the *last_block* is the difficulty that was
+            # active *before* this block was mined. We need to calculate the *new* difficulty
+            # for the *next* block to be mined.
             return self.calculate_difficulty(last_block, self.chain)
         else:
-            # If not an adjustment block, difficulty remains the same as the last block
+            # If it's not an adjustment block, or it's the genesis block,
+            # difficulty remains the same as the last block's recorded difficulty.
             return last_block['difficulty']
 
 
@@ -264,7 +271,7 @@ class ArthaBlockchain:
         # Convert hash to integer to compare with difficulty target
         guess_hash_int = int(guess_hash, 16)
         
-        # The target is 2^256 / difficulty.
+        # The target is MAX_DIFFICULTY / difficulty.
         # A higher 'difficulty' number means an easier target hash (larger number)
         # A lower 'difficulty' number means a harder target hash (smaller number, more leading zeros)
         # So, we check if the guess_hash_int is LESS THAN or EQUAL TO the target.
@@ -292,23 +299,17 @@ class ArthaBlockchain:
 
         for i in range(1, len(chain)):
             block = chain[i]
-            last_block = chain[i-1]
+            last_block_of_validation_pair = chain[i-1] # The block *before* the current one being validated
 
             # 1. Check previous block's hash
-            if block['previous_hash'] != self.hash_block(last_block):
+            # The 'previous_hash' in the current block must match the hash of the block before it.
+            if block['previous_hash'] != self.hash_block(last_block_of_validation_pair):
                 print(f"Validation FAILED: Block #{block['index']} has an invalid previous_hash.")
                 return False
 
             # 2. Check Proof of Work
-            # Recalculate difficulty for this specific block's position for verification
-            # The difficulty *stored in the block* is what was used by the miner.
-            # We verify against that stored difficulty.
-            # We also need to get the difficulty the *previous* block had *before* it was mined
-            # to calculate the target for *this* block.
-            
-            # For validation, block['difficulty'] is the target that was used.
-            # The hash of the actual block's content + nonce must meet this difficulty target.
-            # We need to hash the *previous* block's hash combined with the *current* block's nonce.
+            # The difficulty used for validation is the one stored in the current block.
+            # We verify the nonce against the hash of the *previous block* and the stored difficulty.
             if not self.is_valid_proof(block['previous_hash'], block['nonce'], block['difficulty']):
                 print(f"Validation FAILED: Block #{block['index']} has an invalid Proof of Work.")
                 return False
@@ -342,7 +343,7 @@ class ArthaBlockchain:
                     print(f"Validation FAILED: Block #{block['index']}, transaction from {tx['sender']} has an invalid signature.")
                     return False
 
-                # Periksa saldo pengirim
+                # Periksa saldo pengirim (check sender's balance)
                 sender_balance_before_tx = current_balance.get(tx['sender'], 0)
                 if sender_balance_before_tx < tx['amount']:
                     print(f"Validation FAILED: Block #{block['index']}, sender's balance ({tx['sender']}) is insufficient.")
