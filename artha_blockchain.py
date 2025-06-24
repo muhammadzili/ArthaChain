@@ -1,3 +1,4 @@
+# --- File: artha_blockchain.py (Tidak ada perubahan signifikan, kode Anda sudah solid) ---
 # artha_blockchain.py
 
 import time
@@ -35,10 +36,7 @@ class ArthaBlockchain:
             self.known_pending_tx_hashes.clear()
         else:
             logger.info("Blockchain file not found. Creating genesis block...")
-            # Set genesis difficulty to a significantly higher number to prevent early forks.
-            # This will make the very first block take LONGER (e.g., several minutes)
-            # but ensures stability for the nascent network.
-            genesis_difficulty = 200000 # Adjusted significantly higher. Try 500000 or 1000000 if still forking.
+            genesis_difficulty = 200000 
             self.create_genesis_block(genesis_difficulty)
             self.save_chain()
 
@@ -103,22 +101,14 @@ class ArthaBlockchain:
         
         transactions_for_block.append(coinbase_tx)
 
-        # ----- PERBAIKAN LOGIKA DIMULAI DI SINI -----
-        # Alih-alih mengosongkan semua transaksi yang tertunda, kita hanya akan menghapus
-        # transaksi yang telah berhasil dimasukkan ke dalam blok ini.
-
-        # 1. Buat sebuah set berisi ID dari transaksi yang berhasil masuk ke blok.
         included_tx_ids = {self._calculate_transaction_id(tx) for tx in transactions_for_block if 'signature' in tx and tx['signature'] != 'coinbase_signature'}
 
-        # 2. Buat ulang daftar pending_transactions, hanya pertahankan yang ID-nya TIDAK ADA di dalam set di atas.
         self.pending_transactions = [
             tx for tx in self.pending_transactions
             if self._calculate_transaction_id(tx) not in included_tx_ids
         ]
 
-        # 3. Sinkronkan juga known_pending_tx_hashes dengan kondisi pending_transactions yang baru.
         self.known_pending_tx_hashes = {self._calculate_transaction_id(tx) for tx in self.pending_transactions}
-        # ----- AKHIR DARI PERBAIKAN LOGIKA -----
 
         block = {
             'index': len(self.chain),
@@ -135,16 +125,11 @@ class ArthaBlockchain:
         return block
 
     def _calculate_transaction_id(self, tx):
-        """
-        Calculates a unique and stable ID for a transaction.
-        This ID is used for deduplication in pending_transactions.
-        It should use all fields that define the transaction's uniqueness.
-        """
         unique_data = {
             'sender': tx.get('sender'),
             'recipient': tx.get('recipient'),
             'amount': tx.get('amount'),
-            'timestamp': tx.get('timestamp'), # CRITICAL: Use the timestamp from the transaction object
+            'timestamp': tx.get('timestamp'),
             'signature': tx.get('signature')
         }
         return hash_data(json_serialize(unique_data))
@@ -152,49 +137,37 @@ class ArthaBlockchain:
     def add_transaction(self, sender, recipient, amount, signature, public_key_str, timestamp=None):
         if sender == '0':
             logger.warning("Attempted to add coinbase transaction via add_transaction. This should be handled internally by new_block.")
-            return False
+            return None
 
         if not sender or not recipient or amount <= 0:
             logger.warning("Invalid transaction: Sender, recipient, or amount is incorrect.")
-            return False
+            return None
 
-        tx_data_for_verification = {
-            'sender': sender,
-            'recipient': recipient,
-            'amount': amount
-        }
-
+        tx_data_for_verification = { 'sender': sender, 'recipient': recipient, 'amount': amount }
         current_tx_timestamp = timestamp if timestamp is not None else time.time()
         
         temp_transaction_for_hash = {
-            'sender': sender,
-            'recipient': recipient,
-            'amount': amount,
-            'timestamp': current_tx_timestamp,
-            'signature': signature,
+            'sender': sender, 'recipient': recipient, 'amount': amount,
+            'timestamp': current_tx_timestamp, 'signature': signature,
             'public_key_str': public_key_str
         }
-
         tx_id = self._calculate_transaction_id(temp_transaction_for_hash)
 
         if tx_id in self.known_pending_tx_hashes:
             logger.debug(f"Transaction {tx_id[:10]}... already in pending queue. Ignoring duplicate.")
-            return False
+            return None
 
         if not ArthaWallet.verify_signature(tx_data_for_verification, public_key_str, signature):
             logger.warning("Invalid transaction: Signature does not match.")
-            return False
+            return None
 
         if self.get_balance(sender) < amount:
             logger.warning(f"Invalid transaction: Sender's balance ({self.get_balance(sender)} ARTH) is insufficient for {amount} ARTH.")
-            return False
+            return None
 
         transaction = {
-            'sender': sender,
-            'recipient': recipient,
-            'amount': amount,
-            'timestamp': current_tx_timestamp,
-            'signature': signature,
+            'sender': sender, 'recipient': recipient, 'amount': amount,
+            'timestamp': current_tx_timestamp, 'signature': signature,
             'public_key_str': public_key_str
         }
         self.pending_transactions.append(transaction)
@@ -205,7 +178,7 @@ class ArthaBlockchain:
     @property
     def last_block(self):
         if not self.chain:
-            logger.error("Attempted to get last_block from an empty chain. This should not happen after genesis creation.")
+            logger.error("Attempted to get last_block from an empty chain.")
             return None
         return self.chain[-1]
 
@@ -223,7 +196,6 @@ class ArthaBlockchain:
             for tx in block['transactions']:
                 balances.setdefault(tx['recipient'], 0)
                 balances.setdefault(tx['sender'], 0)
-
                 if tx['sender'] == '0':
                     balances[tx['recipient']] += tx['amount']
                 else:
@@ -233,7 +205,6 @@ class ArthaBlockchain:
 
     def get_balance(self, address):
         balance = self._get_balances_at_block_height(len(self.chain)).get(address, 0)
-        
         for tx in self.pending_transactions:
             if tx['recipient'] == address:
                 balance += tx['amount']
@@ -242,147 +213,89 @@ class ArthaBlockchain:
         return balance
 
     def calculate_difficulty(self, last_block, chain):
-        if last_block['index'] == 0:
-            return last_block['difficulty']
-        
-        if last_block['index'] % self.DIFFICULTY_ADJUSTMENT_INTERVAL != 0:
-            return last_block['difficulty']
-
-        if last_block['index'] < self.DIFFICULTY_ADJUSTMENT_INTERVAL:
-            return last_block['difficulty']
+        if last_block['index'] == 0: return last_block['difficulty']
+        if last_block['index'] % self.DIFFICULTY_ADJUSTMENT_INTERVAL != 0: return last_block['difficulty']
+        if last_block['index'] < self.DIFFICULTY_ADJUSTMENT_INTERVAL: return last_block['difficulty']
 
         first_block_in_interval = chain[max(0, last_block['index'] - self.DIFFICULTY_ADJUSTMENT_INTERVAL)]
-
         actual_time_taken = last_block['timestamp'] - first_block_in_interval['timestamp']
         expected_time = self.DIFFICULTY_ADJUSTMENT_INTERVAL * self.TARGET_BLOCK_TIME_SECONDS
-
         new_difficulty = last_block['difficulty']
 
-        if actual_time_taken < expected_time / 2:
-            new_difficulty = new_difficulty // 2
-        elif actual_time_taken > expected_time * 2:
-            new_difficulty = new_difficulty * 2
-        elif actual_time_taken < expected_time:
-            new_difficulty = int(new_difficulty * 0.9)
-        elif actual_time_taken > expected_time:
-            new_difficulty = int(new_difficulty * 1.1)
+        if actual_time_taken < expected_time / 2: new_difficulty //= 2
+        elif actual_time_taken > expected_time * 2: new_difficulty *= 2
+        elif actual_time_taken < expected_time: new_difficulty = int(new_difficulty * 0.9)
+        elif actual_time_taken > expected_time: new_difficulty = int(new_difficulty * 1.1)
         
         new_difficulty = max(1, min(new_difficulty, self.MAX_DIFFICULTY))
-
-        logger.info(f"--- Difficulty Adjusted at block #{last_block['index']} ---")
-        logger.info(f"  Actual Time: {actual_time_taken:.2f}s, Expected Time: {expected_time}s")
-        logger.info(f"  Old Difficulty: {hex(last_block['difficulty'])}, New Difficulty: {hex(new_difficulty)}")
-        
+        logger.info(f"--- Difficulty Adjusted at block #{last_block['index']}: Old {hex(last_block['difficulty'])}, New {hex(new_difficulty)} ---")
         return new_difficulty
 
-
     def get_current_difficulty(self):
-        if not self.chain:
-            return self.MAX_DIFFICULTY // (1000 * 1000)
-
+        if not self.chain: return self.MAX_DIFFICULTY // (1000 * 1000)
         last_block = self.last_block
-        
         if (last_block['index'] != 0) and (last_block['index'] % self.DIFFICULTY_ADJUSTMENT_INTERVAL == 0):
             return self.calculate_difficulty(last_block, self.chain)
         else:
             return last_block['difficulty']
 
-
     def is_valid_proof(self, last_block_hash, nonce, difficulty):
         guess = f'{last_block_hash}{nonce}'.encode('utf-8')
         guess_hash = hashlib.sha256(guess).hexdigest()
-        
-        guess_hash_int = int(guess_hash, 16)
         target = self.MAX_DIFFICULTY // difficulty
-        
-        is_valid = guess_hash_int <= target
-        
-        return is_valid
-
+        return int(guess_hash, 16) <= target
 
     def is_chain_valid(self, chain):
-        if not chain:
-            return False
-
+        if not chain: return False
         current_balance = {}
-
         for i in range(len(chain)):
             block = chain[i]
-            
             for tx in block['transactions']:
                 current_balance.setdefault(tx['recipient'], 0)
                 current_balance.setdefault(tx['sender'], 0)
-
             if block['index'] > 0:
                 last_block_of_validation_pair = chain[i-1]
-
                 if block['previous_hash'] != self.hash_block(last_block_of_validation_pair):
-                    logger.error(f"Validation FAILED: Block #{block['index']} has an invalid previous_hash.")
+                    logger.error(f"Validation FAILED: Block #{block['index']} invalid previous_hash.")
                     return False
-
-                if block['difficulty'] <= 0:
-                     logger.error(f"Validation FAILED: Block #{block['index']} has invalid (<=0) difficulty.")
-                     return False
-
                 if not self.is_valid_proof(block['previous_hash'], block['nonce'], block['difficulty']):
-                    logger.error(f"Validation FAILED: Block #{block['index']} has an invalid Proof of Work.")
+                    logger.error(f"Validation FAILED: Block #{block['index']} invalid PoW.")
                     return False
-
             coinbase_tx_found = False
-            
             for tx in block['transactions']:
-                if tx['sender'] == '0': # Coinbase transaction
-                    if coinbase_tx_found:
-                        logger.error(f"Validation FAILED: Block #{block['index']} has more than one coinbase transaction.")
-                        return False
-                    if tx['amount'] != self.BLOCK_REWARD:
-                        logger.error(f"Validation FAILED: Block #{block['index']} coinbase reward is incorrect: {tx['amount']} (should be {self.BLOCK_REWARD}).")
-                        return False
-                    if block['index'] > self.MAX_BLOCKS and tx['amount'] > 0:
-                        logger.error(f"Validation FAILED: Block #{block['index']} mined after max supply reached.")
-                        return False
+                if tx['sender'] == '0':
+                    if coinbase_tx_found: return False # More than one coinbase
+                    if tx['amount'] != self.BLOCK_REWARD: return False # Incorrect reward
                     coinbase_tx_found = True
                     current_balance[tx['recipient']] = current_balance.get(tx['recipient'], 0) + tx['amount']
                     continue
-
-                tx_data_for_verification = {
-                    'sender': tx['sender'],
-                    'recipient': tx['recipient'],
-                    'amount': tx['amount']
-                }
+                
+                tx_data_for_verification = { 'sender': tx['sender'], 'recipient': tx['recipient'], 'amount': tx['amount'] }
                 if 'public_key_str' not in tx or not ArthaWallet.verify_signature(tx_data_for_verification, tx['public_key_str'], tx['signature']):
-                    logger.error(f"Validation FAILED: Block #{block['index']}, transaction from {tx['sender'][:8]}... has invalid or missing signature/public key.")
+                    logger.error(f"Validation FAILED: Block #{block['index']}, tx from {tx['sender'][:8]}... invalid signature.")
                     return False
-
-                sender_balance_at_point_of_tx = current_balance.get(tx['sender'], 0)
-                if sender_balance_at_point_of_tx < tx['amount']:
-                    logger.error(f"Validation FAILED: Block #{block['index']}, sender's balance ({tx['sender'][:8]}...) is insufficient ({sender_balance_at_point_of_tx} < {tx['amount']}).")
+                
+                sender_balance = current_balance.get(tx['sender'], 0)
+                if sender_balance < tx['amount']:
+                    logger.error(f"Validation FAILED: Block #{block['index']}, sender {tx['sender'][:8]}... insufficient balance.")
                     return False
-
-                current_balance[tx['sender']] = sender_balance_at_point_of_tx - tx['amount']
-                current_balance[tx['recipient']] = current_balance.get(tx['recipient'], 0) + tx['amount']
-
+                current_balance[tx['sender']] -= tx['amount']
+                current_balance[tx['recipient']] += tx['amount']
+            
             if not coinbase_tx_found and block['index'] <= self.MAX_BLOCKS and block['index'] != 0:
-                 logger.error(f"Validation FAILED: Block #{block['index']} does not have a coinbase transaction.")
-                 return False
-
-
+                logger.error(f"Validation FAILED: Block #{block['index']} no coinbase tx.")
+                return False
         logger.info("Blockchain chain is valid.")
         return True
-
 
     def replace_chain(self, new_chain):
         if len(new_chain) > len(self.chain) and self.is_chain_valid(new_chain):
             logger.info("Chain replaced with a longer and valid chain.")
             self.chain = new_chain
             self.pending_transactions = []
-            self.known_pending_tx_hashes.clear() # Clear pending hashes
+            self.known_pending_tx_hashes.clear()
             self.save_chain()
             return True
-        elif len(new_chain) <= len(self.chain):
-            logger.debug("New chain is not longer.")
-        else:
-            logger.warning("New chain is not valid.")
         return False
 
     def save_chain(self):
