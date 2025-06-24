@@ -103,8 +103,22 @@ class ArthaBlockchain:
         
         transactions_for_block.append(coinbase_tx)
 
-        self.pending_transactions = []
-        self.known_pending_tx_hashes.clear()
+        # ----- PERBAIKAN LOGIKA DIMULAI DI SINI -----
+        # Alih-alih mengosongkan semua transaksi yang tertunda, kita hanya akan menghapus
+        # transaksi yang telah berhasil dimasukkan ke dalam blok ini.
+
+        # 1. Buat sebuah set berisi ID dari transaksi yang berhasil masuk ke blok.
+        included_tx_ids = {self._calculate_transaction_id(tx) for tx in transactions_for_block if 'signature' in tx and tx['signature'] != 'coinbase_signature'}
+
+        # 2. Buat ulang daftar pending_transactions, hanya pertahankan yang ID-nya TIDAK ADA di dalam set di atas.
+        self.pending_transactions = [
+            tx for tx in self.pending_transactions
+            if self._calculate_transaction_id(tx) not in included_tx_ids
+        ]
+
+        # 3. Sinkronkan juga known_pending_tx_hashes dengan kondisi pending_transactions yang baru.
+        self.known_pending_tx_hashes = {self._calculate_transaction_id(tx) for tx in self.pending_transactions}
+        # ----- AKHIR DARI PERBAIKAN LOGIKA -----
 
         block = {
             'index': len(self.chain),
