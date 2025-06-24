@@ -31,9 +31,12 @@ class ArthaBlockchain:
             print(f"Blockchain loaded from '{self.blockchain_file}'. Total blocks: {len(self.chain)}")
         else:
             print("Blockchain file not found. Creating genesis block...")
-            # For genesis block, we'll give it a starting difficulty.
-            # A higher difficulty number means an easier target (fewer leading zeros required)
-            genesis_difficulty = 2**256 // (1000 * 1000) # Example starting difficulty, adjust as needed for initial speed
+            # For genesis block, we'll give it a very easy starting difficulty for testing.
+            # A SMALLER 'difficulty' number means an EASIER target (larger target hash number).
+            # This makes the first block very fast to mine.
+            genesis_difficulty = 1000 # Changed from 2**256 // (1000 * 1000) to a smaller, easier value
+            # You can make it even smaller, like 10, for almost instant mining,
+            # or larger (e.g., 100000) for a few seconds if you want more "work".
             self.create_genesis_block(genesis_difficulty)
             self.save_chain() # Save the genesis block
 
@@ -128,7 +131,7 @@ class ArthaBlockchain:
 
         transaction = {
             'sender': sender,
-            'recipient': recipient, # FIX: Changed from 'amount' to 'recipient'
+            'recipient': recipient,
             'amount': amount,
             'timestamp': time.time(),
             'signature': signature,
