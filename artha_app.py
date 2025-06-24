@@ -25,19 +25,21 @@ def setup_logging(app_name):
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
 
+    # Console Handler: Only show WARNING and above to keep console clean
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.WARNING) # Changed to WARNING
     formatter_console = logging.Formatter('%(levelname)s: %(message)s')
     console_handler.setFormatter(formatter_console)
     root_logger.addHandler(console_handler)
 
+    # File Handler: For DEBUG and above (all messages)
     file_handler = logging.FileHandler(log_file_path)
     file_handler.setLevel(logging.DEBUG)
     formatter_file = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter_file)
     root_logger.addHandler(file_handler)
 
-    logging.info(f"Logging configured. Console: INFO+, File ('{log_file_path}'): DEBUG+")
+    logging.info(f"Logging configured. Console: WARNING+, File ('{log_file_path}'): DEBUG+")
 
 
 def display_menu():
@@ -54,7 +56,8 @@ def display_menu():
     print("5. Show Blockchain")
     print("6. Show Pending Transactions")
     print("7. Synchronize Blockchain (Manual Trigger)")
-    print("8. Exit")
+    print("8. Show Log") # New option
+    print("9. Exit") # Changed to 9
     print("="*40)
 
 def run_app():
@@ -108,15 +111,12 @@ def run_app():
                 
                 signature = wallet.sign_transaction(transaction_data)
                 
-                # IMPORTANT: Pass the current time as the transaction's timestamp
-                # This will be used for its unique ID.
-                created_timestamp = time.time() 
-                added_transaction_obj = blockchain.add_transaction(public_address, recipient, amount, signature, wallet.public_key.export_key().decode('utf-8'), timestamp=created_timestamp)
+                added_transaction_obj = blockchain.add_transaction(public_address, recipient, amount, signature, wallet.public_key.export_key().decode('utf-8'))
                 
                 if added_transaction_obj:
                     logging.info("Transaction successfully created and added to queue. Waiting to be included in a block.")
                     node.broadcast_message('NEW_TRANSACTION', {
-                        'transaction': added_transaction_obj, # Use the actual transaction object with its original timestamp
+                        'transaction': added_transaction_obj,
                         'public_key_str': wallet.public_key.export_key().decode('utf-8')
                     })
                 else:
@@ -178,7 +178,19 @@ def run_app():
                 logging.info("Manually triggering blockchain synchronization...")
                 node.sync_blockchain_from_known_peers()
 
-            elif choice == '8':
+            elif choice == '8': # New: Show Log
+                log_file_path = os.path.join(os.path.expanduser("~"), ".artha_chain", "logs", "artha_app.log")
+                print(f"\n--- Log File ({log_file_path}) ---")
+                try:
+                    with open(log_file_path, 'r') as f:
+                        for line in f:
+                            print(line.strip())
+                except FileNotFoundError:
+                    print("Log file not found. Run the app to generate logs.")
+                print("--- End of Log ---")
+                input("\nPress Enter to return to menu...") # Pause to allow user to read log
+
+            elif choice == '9': # Changed from 8 to 9
                 logging.info("Exiting ArthaChain application. Goodbye!")
                 break
 
