@@ -1,12 +1,12 @@
 # artha_app.py
-# CATATAN: File ini sekarang dianggap 'legacy'.
-# Fungsi utamanya telah digantikan oleh artha_gui.py yang lebih aman dan ramah pengguna.
-# Anda masih bisa menjalankannya untuk mode terminal jika diperlukan.
+# CATATAN: File ini adalah aplikasi CLI yang fungsional.
+# GUI direkomendasikan, tetapi ini bekerja dengan baik untuk penggunaan terminal/server.
 
 import time
 import logging
 import os
 import sys
+import getpass
 from artha_blockchain import ArthaBlockchain
 from artha_wallet import ArthaWallet
 from artha_node import ArthaNode
@@ -48,7 +48,7 @@ def display_menu():
     Displays the menu options for the user.
     """
     print("\n" + "="*40)
-    print("      ARTHACHAIN TERMINAL (LEGACY)")
+    print("      ARTHACHAIN TERMINAL")
     print("="*40)
     print("1. Show Address & Balance")
     print("2. Send ARTH")
@@ -62,11 +62,10 @@ def run_app():
     """
     Main function to run the ArthaChain application.
     """
-    setup_logging("artha_app_legacy")
+    setup_logging("artha_app_cli")
 
     # PERUBAHAN KRITIS: Meminta password untuk membuka dompet
     try:
-        import getpass
         password = getpass.getpass("Masukkan password dompet Anda: ")
         if not password:
             print("Password tidak boleh kosong.")
@@ -75,8 +74,8 @@ def run_app():
     except ValueError as e:
         print(f"Gagal memuat dompet: {e}")
         return
-    except ImportError:
-        print("Gagal mengimpor 'getpass'. Harap jalankan di terminal yang mendukungnya.")
+    except (ImportError, EOFError, KeyboardInterrupt):
+        print("\nOperasi dibatalkan.")
         return
 
 
@@ -117,7 +116,6 @@ def run_app():
                     continue
                 
                 # Meminta password lagi untuk konfirmasi pengiriman
-                import getpass
                 tx_password = getpass.getpass("Konfirmasi password dompet untuk mengirim: ")
                 if tx_password != password:
                     print("Password salah. Transaksi dibatalkan.")
@@ -138,12 +136,12 @@ def run_app():
                     logging.warning("Failed to create transaction.")
 
             elif choice == '3':
-                if node.peers:
+                if not node.peers:
+                    print("\nNo connected peers.")
+                else:
                     print("\nConnected Peers:")
                     with node.lock:
                         for peer in node.peers.keys(): print(f"- {peer}")
-                else:
-                    print("\nNo connected peers.")
 
             elif choice == '4':
                 print("\n--- Blockchain ---")
@@ -152,11 +150,11 @@ def run_app():
 
             elif choice == '5':
                 print("\nPending Transactions:")
-                if node.blockchain.pending_transactions:
+                if not node.blockchain.pending_transactions:
+                    print("No pending transactions.")
+                else:
                     for tx in node.blockchain.pending_transactions:
                         print(f"- From: {tx['sender'][:10]}... To: {tx['recipient'][:10]}... Amount: {tx['amount']} ARTH")
-                else:
-                    print("No pending transactions.")
 
             elif choice == '6':
                 logging.info("Exiting ArthaChain application.")
@@ -178,4 +176,3 @@ if __name__ == '__main__':
             logging.error(f"Invalid port. Using default {APP_PORT}.")
 
     run_app()
-
