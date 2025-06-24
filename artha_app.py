@@ -25,9 +25,9 @@ def setup_logging(app_name):
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
 
-    # Console Handler: Only show WARNING and above to keep console clean
+    # Console Handler: Only show ERROR and above to keep console very clean
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.WARNING) # Changed to WARNING
+    console_handler.setLevel(logging.ERROR) # Changed to ERROR
     formatter_console = logging.Formatter('%(levelname)s: %(message)s')
     console_handler.setFormatter(formatter_console)
     root_logger.addHandler(console_handler)
@@ -39,7 +39,7 @@ def setup_logging(app_name):
     file_handler.setFormatter(formatter_file)
     root_logger.addHandler(file_handler)
 
-    logging.info(f"Logging configured. Console: WARNING+, File ('{log_file_path}'): DEBUG+")
+    logging.info(f"Logging configured. Console: ERROR+, File ('{log_file_path}'): DEBUG+")
 
 
 def display_menu():
