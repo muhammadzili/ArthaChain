@@ -4,8 +4,13 @@ import socket
 import threading
 import json
 import time
+import logging # Import logging module
 from artha_utils import json_serialize
 from artha_blockchain import ArthaBlockchain
+
+# Configure logger for this module
+logger = logging.getLogger(__name__)
+# By default, logs will go to the root logger which is configured in app/miner scripts
 
 # --- New: Bootstrap Peers Configuration ---
 # These are known, stable peer addresses that new nodes will try to connect to initially.
@@ -37,7 +42,7 @@ class ArthaNode:
         self.server_thread = threading.Thread(target=self._start_server)
         self.server_thread.daemon = True
         self.server_thread.start()
-        print(f"ArthaChain node started at {self.host}:{self.port}")
+        logger.info(f"ArthaChain node started at {self.host}:{self.port}")
         
         # --- Modified: Automatically connect to bootstrap peers and then sync ---
         threading.Thread(target=self.connect_and_sync_initial).start()
@@ -48,19 +53,23 @@ class ArthaNode:
         """
         self.is_running = False
         if self.server_socket:
-            self.server_socket.close()
+            try:
+                self.server_socket.shutdown(socket.SHUT_RDWR)
+                self.server_socket.close()
+            except OSError:
+                pass # Already closed
         
         # Close all active peer connections
         with self.lock:
-            for addr, sock in list(self.peers.items()): # Iterate on a copy as dict changes during iteration
+            for addr, sock in list(self.peers.items()):
                 try:
                     sock.shutdown(socket.SHUT_RDWR)
                     sock.close()
                 except OSError as e:
-                    pass # Socket might already be closed
+                    logger.debug(f"Error closing socket for {addr}: {e}") # Log error, but don't stop
             self.peers.clear()
 
-        print(f"ArthaChain node at {self.host}:{self.port} stopped.")
+        logger.info(f"ArthaChain node at {self.host}:{self.port} stopped.")
 
     def _start_server(self):
         """
@@ -75,7 +84,7 @@ class ArthaNode:
                 try:
                     conn, addr = self.server_socket.accept()
                     peer_address = f"{addr[0]}:{addr[1]}"
-                    print(f"Incoming connection from {peer_address}") # Keep this for clear debugging
+                    logger.info(f"Incoming connection from {peer_address}") # Log incoming connections
                     
                     # Store the socket for this incoming connection
                     with self.lock:
@@ -84,10 +93,10 @@ class ArthaNode:
                     threading.Thread(target=self._handle_client, args=(conn, peer_address)).start()
                 except OSError as e:
                     if self.is_running:
-                        print(f"Error accepting connection: {e}")
+                        logger.error(f"Error accepting connection: {e}")
                     break
         except Exception as e:
-            print(f"Failed to start server at {self.host}:{self.port}: {e}")
+            logger.error(f"Failed to start server at {self.host}:{self.port}: {e}")
             self.is_running = False
 
     def _handle_client(self, conn, peer_address): # peer_address is now passed directly
@@ -107,11 +116,10 @@ class ArthaNode:
                         message = json.loads(line.decode('utf-8'))
                         self._process_message(message, peer_address) # Pass peer_address instead of conn
                     except json.JSONDecodeError:
-                        print(f"Invalid JSON message from {peer_address}: {line}")
+                        logger.warning(f"Invalid JSON message from {peer_address}: {line}")
                         break # Skip malformed part and continue
         except Exception as e:
-            # print(f"Connection with {peer_address} lost or error: {e}") # Keep this for debugging connection issues
-            pass
+            logger.debug(f"Connection with {peer_address} lost or error: {e}") # Debug level for common disconnects
         finally:
             with self.lock:
                 if peer_address in self.peers:
@@ -120,7 +128,7 @@ class ArthaNode:
                 conn.close()
             except OSError:
                 pass # Already closed
-            print(f"Connection to {peer_address} closed.") # Inform when connection closes
+            logger.info(f"Connection to {peer_address} closed.") # Inform when connection closes
 
     def connect_to_peer(self, peer_host, peer_port):
         """
@@ -129,12 +137,12 @@ class ArthaNode:
         """
         peer_address = f"{peer_host}:{peer_port}"
         if peer_address == f"{self.host}:{self.port}":
-            # print("Cannot connect to self.")
+            # logger.debug("Cannot connect to self.") # More appropriate for debug
             return False
 
         with self.lock:
             if peer_address in self.peers:
-                # print(f"Already connected to {peer_address}.")
+                # logger.debug(f"Already connected to {peer_address}.")
                 return False
 
         try:
@@ -146,19 +154,18 @@ class ArthaNode:
             with self.lock:
                 self.peers[peer_address] = s # Store the socket
             
-            print(f"Successfully connected to peer: {peer_address}")
+            logger.info(f"Successfully connected to peer: {peer_address}")
             # Start a thread to handle messages from this outgoing peer
             threading.Thread(target=self._handle_client, args=(s, peer_address)).start()
             
             # Send a message to tell the peer our address immediately after connecting
-            # This is done on a new thread to not block the main connection logic
             threading.Thread(target=self.send_message, args=(peer_address, 'NEW_PEER', {'address': f"{self.host}:{self.port}"})).start()
 
             # Request chain from the newly connected peer (will be handled by _process_message's specific logic)
             threading.Thread(target=self.request_chain_from_specific_peer, args=(peer_address,)).start()
             return True
         except Exception as e:
-            # print(f"Failed to connect to peer {peer_address}: {e}")
+            logger.debug(f"Failed to connect to peer {peer_address}: {e}") # Debug level for failed connections
             return False
 
     def send_message(self, peer_address, message_type, data):
@@ -175,7 +182,7 @@ class ArthaNode:
             try:
                 sock.sendall(message_str.encode('utf-8'))
             except OSError as e: # Handle socket errors during send
-                # print(f"Error sending message to {peer_address}: {e}")
+                logger.debug(f"Error sending message to {peer_address}: {e}. Closing socket.")
                 with self.lock:
                     if peer_address in self.peers:
                         del self.peers[peer_address] # Remove peer if send fails
@@ -195,8 +202,9 @@ class ArthaNode:
                 temp_s.connect((host, int(port)))
                 temp_s.sendall(message_str.encode('utf-8'))
                 temp_s.close()
+                logger.debug(f"Sent temp message to {peer_address}.")
             except Exception as e:
-                # print(f"Failed to send temp message to {peer_address}: {e}")
+                logger.debug(f"Failed to send temp message to {peer_address}: {e}")
                 pass
 
 
@@ -205,7 +213,6 @@ class ArthaNode:
         Broadcasts a message to all connected peers using their persistent sockets.
         """
         # Create a copy of the peer addresses to iterate, as self.peers might change
-        # due to other threads handling disconnections.
         peers_to_broadcast = []
         with self.lock:
             peers_to_broadcast = list(self.peers.keys()) # Only get addresses
@@ -214,20 +221,19 @@ class ArthaNode:
             if peer_address == exclude_peer:
                 continue
             
-            # Send message using the persistent send_message, which handles socket fetching
             self.send_message(peer_address, message_type, data)
 
 
-    def _process_message(self, message, sender_peer_address): # Added sender_peer_address
+    def _process_message(self, message, sender_peer_address):
         """
-        Memproses pesan yang diterima dari peer.
+        Processes a message received from a peer.
         """
         msg_type = message.get('type')
         msg_data = message.get('data')
 
         if msg_type == 'NEW_BLOCK':
             block = msg_data['block']
-            print(f"\nReceived new block #{block['index']} from peer {sender_peer_address}.")
+            logger.info(f"Received new block #{block['index']} from peer {sender_peer_address}.")
             # Check if received block is valid and extends our chain
             if block['index'] == self.blockchain.last_block['index'] + 1 and \
                self.blockchain.hash_block(self.blockchain.last_block) == block['previous_hash'] and \
@@ -236,14 +242,14 @@ class ArthaNode:
                 self.blockchain.chain.append(block)
                 self.blockchain.pending_transactions = [] # Clear pending transactions
                 self.blockchain.save_chain()
-                print(f"Block #{block['index']} added to local chain.")
+                logger.info(f"Block #{block['index']} added to local chain.")
                 
                 # Propagate received block to other peers (excluding sender)
                 if time.time() - self.last_block_broadcast_time > 5: # Rate limit
                     self.broadcast_message('NEW_BLOCK', {'block': block}, exclude_peer=sender_peer_address)
                     self.last_block_broadcast_time = time.time()
             else:
-                print(f"Block #{block['index']} rejected (invalid or not the next block). Requesting full chain from {sender_peer_address}...")
+                logger.warning(f"Block #{block['index']} rejected (invalid or not the next block) from {sender_peer_address}. Requesting full chain...")
                 # If block is invalid, request the full chain from the sender peer
                 threading.Thread(target=self.request_chain_from_specific_peer, args=(sender_peer_address,)).start()
                 # Also try to sync from any other known peers if direct request fails
@@ -254,25 +260,25 @@ class ArthaNode:
             sender_pk = msg_data['public_key_str'] # Get public key from message
             # Add transaction to pending list if valid
             if self.blockchain.add_transaction(tx['sender'], tx['recipient'], tx['amount'], tx['signature'], sender_pk):
-                print(f"Received new transaction from {tx['sender']} to {tx['recipient']} for {tx['amount']} ARTH.")
+                logger.info(f"Received new transaction from {tx['sender'][:8]}... to {tx['recipient'][:8]}... for {tx['amount']} ARTH.")
                 # Broadcast the transaction to other peers (excluding sender)
                 self.broadcast_message('NEW_TRANSACTION', {'transaction': tx, 'public_key_str': sender_pk}, exclude_peer=sender_peer_address)
 
 
         elif msg_type == 'REQUEST_CHAIN':
-            print(f"Received full chain request from {sender_peer_address}. Sending chain...")
+            logger.debug(f"Received full chain request from {sender_peer_address}. Sending chain...") # Changed to debug level
             self.send_message(sender_peer_address, 'RESPOND_CHAIN', {'chain': self.blockchain.chain})
 
         elif msg_type == 'RESPOND_CHAIN':
             received_chain = msg_data['chain']
-            print(f"Received chain from peer {sender_peer_address}. Length: {len(received_chain)}")
+            logger.info(f"Received chain from peer {sender_peer_address}. Length: {len(received_chain)}")
             self.blockchain.replace_chain(received_chain)
 
         elif msg_type == 'NEW_PEER':
             peer_address = msg_data['address']
             if peer_address != f"{self.host}:{self.port}": # Don't try to connect to self
                 if self.connect_to_peer(peer_address.split(':')[0], int(peer_address.split(':')[1])):
-                    print(f"Added and connected to new discovered peer: {peer_address}.")
+                    logger.info(f"Added and connected to new discovered peer: {peer_address}.")
                     # Broadcast this new peer to other peers (excluding sender)
                     self.broadcast_message('NEW_PEER', {'address': peer_address}, exclude_peer=sender_peer_address)
 
@@ -281,7 +287,7 @@ class ArthaNode:
         """
         Sends a request for the full blockchain to a specific peer using its persistent socket.
         """
-        print(f"Requesting chain from {peer_address}...")
+        logger.debug(f"Requesting chain from {peer_address}...") # Changed to debug level
         self.send_message(peer_address, 'REQUEST_CHAIN', {})
 
 
@@ -290,7 +296,7 @@ class ArthaNode:
         Attempts to connect to bootstrap peers and then synchronize the blockchain.
         This runs in a separate thread.
         """
-        print("Attempting to connect to bootstrap peers and synchronize blockchain...")
+        logger.info("Attempting to connect to bootstrap peers and synchronize blockchain...")
         
         time.sleep(1) # Give a very short moment for server socket to bind
 
@@ -303,9 +309,9 @@ class ArthaNode:
                 time.sleep(1) # Small delay between connecting to different bootstrap peers
 
         if not connected_to_any_peer:
-            print("Failed to connect to any bootstrap peers. Starting with local chain.")
+            logger.warning("Failed to connect to any bootstrap peers. Starting with local chain.")
         else:
-            print("Connected to bootstrap peers. Giving time for initial chain synchronization.")
+            logger.info("Connected to bootstrap peers. Giving time for initial chain synchronization.")
             time.sleep(5) # Allow some time for initial chain sync from bootstrap
             
             # After initial bootstrap connections, trigger a comprehensive sync
@@ -318,12 +324,12 @@ class ArthaNode:
         """
         with self.lock: # Acquire lock before accessing self.peers
             if not self.peers:
-                # print("No known peers for active synchronization.")
+                # logger.debug("No known peers for active synchronization.")
                 return
 
             peers_to_sync_from = list(self.peers.keys()) # Get a copy of peer addresses
 
-        print("Triggering active blockchain synchronization from known peers...")
+        logger.info("Triggering active blockchain synchronization from known peers...")
         current_longest_chain_len = len(self.blockchain.chain) 
         
         for peer_address in peers_to_sync_from:
@@ -333,8 +339,8 @@ class ArthaNode:
 
             # If the chain was replaced by a longer one, we can stop trying other peers for this sync round
             if len(self.blockchain.chain) > current_longest_chain_len:
-                print(f"Blockchain updated during active sync from {peer_address}.")
+                logger.info(f"Blockchain updated during active sync from {peer_address}.")
                 return # Chain was replaced, no need to query other peers in this round
         
-        print("Active blockchain synchronization finished. Local chain is likely up-to-date or no longer peers responded with a longer chain.")
+        logger.info("Active blockchain synchronization finished. Local chain is likely up-to-date or no longer peers responded with a longer chain.")
 
