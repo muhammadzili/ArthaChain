@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import logging # FIX: Import the logging module
 
 def hash_data(data):
     """
