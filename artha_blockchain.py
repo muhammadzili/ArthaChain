@@ -4,9 +4,9 @@ import time
 import hashlib
 from artha_utils import hash_data, json_serialize, load_json_file, save_json_file
 from artha_wallet import ArthaWallet
-import logging
+import logging # Import logging module here as well
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # Get logger for this module
 
 class ArthaBlockchain:
     TOTAL_SUPPLY = 30_000_000
@@ -14,8 +14,8 @@ class ArthaBlockchain:
     MAX_BLOCKS = TOTAL_SUPPLY // BLOCK_REWARD
 
     # --- New PoW and Difficulty Adjustment Constants ---
-    # CRITICAL CHANGE: Set TARGET_BLOCK_TIME_SECONDS to 3 seconds for fast mining
-    TARGET_BLOCK_TIME_SECONDS = 3 # Target 1 block every 3 seconds
+    # Target 1 block every 3 seconds
+    TARGET_BLOCK_TIME_SECONDS = 3
     DIFFICULTY_ADJUSTMENT_INTERVAL = 10 # Adjust difficulty every 10 blocks
     MAX_DIFFICULTY = 2**256 - 1
 
@@ -23,7 +23,7 @@ class ArthaBlockchain:
         self.blockchain_file = blockchain_file
         self.chain = []
         self.pending_transactions = []
-        self.known_pending_tx_hashes = set() # NEW: To quickly check for duplicate pending transactions
+        self.known_pending_tx_hashes = set()
         self._load_or_create_chain()
 
     def _load_or_create_chain(self):
@@ -35,9 +35,10 @@ class ArthaBlockchain:
             self.known_pending_tx_hashes.clear()
         else:
             logger.info("Blockchain file not found. Creating genesis block...")
-            # CRITICAL CHANGE: Set genesis difficulty to an extremely low value for instant initial mining
-            # A very small difficulty number makes the target hash very large, thus extremely easy to find PoW.
-            genesis_difficulty = 10 # Extremely low for very fast initial mining (seconds or less)
+            # Set genesis difficulty to a significantly higher number to prevent early forks.
+            # This will make the very first block take LONGER (e.g., several minutes)
+            # but ensures stability for the nascent network.
+            genesis_difficulty = 200000 # Adjusted significantly higher. Try 500000 or 1000000 if still forking.
             self.create_genesis_block(genesis_difficulty)
             self.save_chain()
 
@@ -54,55 +55,70 @@ class ArthaBlockchain:
         self.chain.append(genesis_block)
         logger.info("Genesis block created!")
 
-def new_block(self, nonce, previous_hash, miner_address, difficulty):
-    if self.get_current_block_height() >= self.MAX_BLOCKS:
-        logger.warning("Supply limit reached.")
-        return None
+    def new_block(self, nonce, previous_hash, miner_address):
+        if self.get_current_block_height() >= self.MAX_BLOCKS:
+            logger.warning("ArthaChain supply limit reached. No new blocks can be mined.")
+            return None
 
-    coinbase_tx = {
-        'sender': '0',
-        'recipient': miner_address,
-        'amount': self.BLOCK_REWARD,
-        'timestamp': time.time(),
-        'signature': 'coinbase_signature'
-    }
+        current_difficulty = self.get_current_difficulty()
 
-    transactions_for_block = []
-    temp_balances = self._get_balances_at_block_height(len(self.chain))
-    sorted_pending = sorted(self.pending_transactions, key=lambda tx: tx['timestamp'])
+        coinbase_tx = {
+            'sender': '0',
+            'recipient': miner_address,
+            'amount': self.BLOCK_REWARD,
+            'timestamp': time.time(),
+            'signature': 'coinbase_signature'
+        }
+        
+        transactions_for_block = []
+        
+        temp_current_balances = self._get_balances_at_block_height(len(self.chain))
+        
+        sorted_pending = sorted(self.pending_transactions, key=lambda tx: tx['timestamp'])
 
-    for tx in sorted_pending:
-        tx_id = self._calculate_transaction_id(tx)
-        tx_data = {k: tx[k] for k in ('sender', 'recipient', 'amount')}
+        for tx in sorted_pending:
+            tx_id = self._calculate_transaction_id(tx)
 
-        if tx['sender'] != '0' and not ArthaWallet.verify_signature(tx_data, tx['public_key_str'], tx['signature']):
-            continue
-        if tx['sender'] != '0' and temp_balances.get(tx['sender'], 0) < tx['amount']:
-            continue
+            tx_data_for_verification = {
+                'sender': tx['sender'],
+                'recipient': tx['recipient'],
+                'amount': tx['amount']
+            }
 
-        if tx_id not in [self._calculate_transaction_id(t) for t in transactions_for_block]:
-            transactions_for_block.append(tx)
-            temp_balances[tx['sender']] -= tx['amount']
-            temp_balances[tx['recipient']] = temp_balances.get(tx['recipient'], 0) + tx['amount']
+            if tx['sender'] != '0' and not ArthaWallet.verify_signature(tx_data_for_verification, tx['public_key_str'], tx['signature']):
+                logger.warning(f"Pending transaction {tx_id[:10]}... has invalid signature during block creation. Discarding.")
+                continue
+            
+            sender_balance_in_block = temp_current_balances.get(tx['sender'], 0)
+            if tx['sender'] != '0' and sender_balance_in_block < tx['amount']:
+                logger.warning(f"Pending transaction {tx_id[:10]}... has insufficient sender balance ({sender_balance_in_block} ARTH). Discarding.")
+                continue
+            
+            if tx_id not in [self._calculate_transaction_id(t) for t in transactions_for_block]:
+                transactions_for_block.append(tx)
+                temp_current_balances[tx['sender']] = sender_balance_in_block - tx['amount']
+                temp_current_balances[tx['recipient']] = temp_current_balances.get(tx['recipient'], 0) + tx['amount']
+            else:
+                logger.debug(f"Duplicate pending transaction {tx_id[:10]}... found while building block. Skipping.")
+        
+        transactions_for_block.append(coinbase_tx)
 
-    transactions_for_block.append(coinbase_tx)
-    self.pending_transactions.clear()
-    self.known_pending_tx_hashes.clear()
+        self.pending_transactions = []
+        self.known_pending_tx_hashes.clear()
 
-    block = {
-        'index': len(self.chain),
-        'timestamp': time.time(),
-        'transactions': transactions_for_block,
-        'nonce': nonce,
-        'previous_hash': previous_hash,
-        'miner_address': miner_address,
-        'difficulty': difficulty
-    }
-
-    self.chain.append(block)
-    logger.info(f"✅ Block #{block['index']} added with {len(transactions_for_block)} txs.")
-    self.save_chain()
-    return block
+        block = {
+            'index': len(self.chain),
+            'timestamp': time.time(),
+            'transactions': transactions_for_block,
+            'nonce': nonce,
+            'previous_hash': previous_hash or self.hash_block(self.chain[-1]),
+            'miner_address': miner_address,
+            'difficulty': current_difficulty
+        }
+        self.chain.append(block)
+        logger.info(f"New block #{block['index']} mined by {miner_address} with difficulty {hex(current_difficulty)}!")
+        self.save_chain()
+        return block
 
     def _calculate_transaction_id(self, tx):
         """
@@ -119,7 +135,7 @@ def new_block(self, nonce, previous_hash, miner_address, difficulty):
         }
         return hash_data(json_serialize(unique_data))
 
-    def add_transaction(self, sender, recipient, amount, signature, public_key_str, timestamp=None): # Added timestamp parameter
+    def add_transaction(self, sender, recipient, amount, signature, public_key_str, timestamp=None):
         if sender == '0':
             logger.warning("Attempted to add coinbase transaction via add_transaction. This should be handled internally by new_block.")
             return False
@@ -140,7 +156,7 @@ def new_block(self, nonce, previous_hash, miner_address, difficulty):
             'sender': sender,
             'recipient': recipient,
             'amount': amount,
-            'timestamp': current_tx_timestamp, # Use this timestamp for creation hash
+            'timestamp': current_tx_timestamp,
             'signature': signature,
             'public_key_str': public_key_str
         }
@@ -163,7 +179,7 @@ def new_block(self, nonce, previous_hash, miner_address, difficulty):
             'sender': sender,
             'recipient': recipient,
             'amount': amount,
-            'timestamp': current_tx_timestamp, # Use the consistent timestamp for the transaction itself
+            'timestamp': current_tx_timestamp,
             'signature': signature,
             'public_key_str': public_key_str
         }
@@ -192,7 +208,7 @@ def new_block(self, nonce, previous_hash, miner_address, difficulty):
             block = self.chain[i]
             for tx in block['transactions']:
                 balances.setdefault(tx['recipient'], 0)
-                balances.setdefault(tx['sender'], 0) # For non-coinbase senders
+                balances.setdefault(tx['sender'], 0)
 
                 if tx['sender'] == '0':
                     balances[tx['recipient']] += tx['amount']
