@@ -14,8 +14,8 @@ class ArthaBlockchain:
     MAX_BLOCKS = TOTAL_SUPPLY // BLOCK_REWARD
 
     # --- New PoW and Difficulty Adjustment Constants ---
-    # CRITICAL CHANGE: Set TARGET_BLOCK_TIME_SECONDS to 3 seconds for fast mining
-    TARGET_BLOCK_TIME_SECONDS = 3 # Target 1 block every 3 seconds
+    # Target 1 block every 3 seconds
+    TARGET_BLOCK_TIME_SECONDS = 3
     DIFFICULTY_ADJUSTMENT_INTERVAL = 10 # Adjust difficulty every 10 blocks
     MAX_DIFFICULTY = 2**256 - 1
 
@@ -23,7 +23,7 @@ class ArthaBlockchain:
         self.blockchain_file = blockchain_file
         self.chain = []
         self.pending_transactions = []
-        self.known_pending_tx_hashes = set() # NEW: To quickly check for duplicate pending transactions
+        self.known_pending_tx_hashes = set()
         self._load_or_create_chain()
 
     def _load_or_create_chain(self):
@@ -35,9 +35,9 @@ class ArthaBlockchain:
             self.known_pending_tx_hashes.clear()
         else:
             logger.info("Blockchain file not found. Creating genesis block...")
-            # CRITICAL CHANGE: Set genesis difficulty to an extremely low value for instant initial mining
-            # A very small difficulty number makes the target hash very large, thus extremely easy to find PoW.
-            genesis_difficulty = 10 # Extremely low for very fast initial mining (seconds or less)
+            # Reverted genesis difficulty to a more stable value.
+            # A value like 10 was too fast and caused forks. 5000 is a good starting point for a few seconds/minutes for the FIRST block.
+            genesis_difficulty = 5000 # Adjusted for more stable initial mining
             self.create_genesis_block(genesis_difficulty)
             self.save_chain()
 
