@@ -388,3 +388,4 @@ class ArthaBlockchain:
         """
         save_json_file(self.blockchain_file, self.chain)
 
+
