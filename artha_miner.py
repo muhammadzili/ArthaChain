@@ -2,17 +2,47 @@
 
 import time
 import hashlib
+import logging
+import os
+import sys
 from artha_blockchain import ArthaBlockchain
 from artha_wallet import ArthaWallet
-from artha_node import ArthaNode # Make sure this is the updated artha_node.py
+from artha_node import ArthaNode
 import threading
-import sys
 
 # Miner Node Configuration
-MINER_HOST = '0.0.0.0' # Listen on all interfaces for external connections
-MINER_PORT = 5001 # Default port for the miner
+MINER_HOST = '0.0.0.0'
+MINER_PORT = 5001
 
-def proof_of_work(last_block, blockchain_instance, node_instance): # Added node_instance to pass through
+def setup_logging(app_name):
+    """Sets up logging to console and a file."""
+    log_dir = os.path.join(os.path.expanduser("~"), ".artha_chain", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file_path = os.path.join(log_dir, f"{app_name}.log")
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    if root_logger.handlers:
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    formatter_console = logging.Formatter('%(levelname)s: %(message)s')
+    console_handler.setFormatter(formatter_console)
+    root_logger.addHandler(console_handler)
+
+    file_handler = logging.FileHandler(log_file_path)
+    file_handler.setLevel(logging.DEBUG)
+    formatter_file = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter_file)
+    root_logger.addHandler(file_handler)
+
+    logging.info(f"Logging configured. Console: INFO+, File ('{log_file_path}'): DEBUG+")
+
+
+def proof_of_work(last_block, blockchain_instance, node_instance):
     """
     Simple Proof of Work algorithm:
     - Find a number 'nonce' such that hashing (last_block_hash + nonce) meets the difficulty target.
@@ -21,27 +51,22 @@ def proof_of_work(last_block, blockchain_instance, node_instance): # Added node_
     difficulty = blockchain_instance.get_current_difficulty()
     nonce = 0
     start_time = time.time()
-    print(f"Starting Proof of Work with difficulty: {hex(difficulty)}")
+    logging.info(f"Starting Proof of Work with difficulty: {hex(difficulty)}")
 
     while not blockchain_instance.is_valid_proof(last_block_hash, nonce, difficulty):
         nonce += 1
         
-        # Check periodically if a new block has arrived from the network
-        # This prevents wasting work if someone else found a block.
-        # Check every 100,000 nonces to avoid too much overhead.
         if nonce % 100000 == 0:
-            # Trigger a quick sync to see if the chain has changed
-            node_instance.sync_blockchain_from_known_peers() # Use the correct method name!
+            node_instance.sync_blockchain_from_known_peers()
             
-            # If the blockchain's last block has changed, our current PoW is outdated
             if blockchain_instance.last_block['index'] != last_block['index']:
-                print("New block received from network while mining. Stopping current PoW and restarting search.")
-                return None # Indicate that mining should stop and restart from fresh block
+                logging.info("New block received from network while mining. Stopping current PoW and restarting search.")
+                return None
 
-            print(f"  Miner working... tried {nonce} nonces. Time elapsed: {time.time() - start_time:.2f}s")
+            logging.debug(f"  Miner working... tried {nonce} nonces. Time elapsed: {time.time() - start_time:.2f}s")
             
     end_time = time.time()
-    print(f"Proof of Work found: {nonce} (took {end_time - start_time:.2f} seconds)")
+    logging.info(f"Proof of Work found: {nonce} (took {end_time - start_time:.2f} seconds)")
     return nonce
 
 
@@ -49,85 +74,75 @@ def run_miner():
     """
     Main function to run the ArthaChain miner.
     """
+    setup_logging("artha_miner")
+
     wallet = ArthaWallet()
     miner_address = wallet.get_public_address()
     blockchain = ArthaBlockchain()
     node = ArthaNode(MINER_HOST, MINER_PORT, blockchain, is_miner=True)
-    node.start() # This call now handles initial bootstrap and sync
+    node.start()
 
-    print("\n" + "="*40)
-    print("      ARTHACHAIN MINER STARTED")
-    print("="*40)
-    print(f"Miner Address: {miner_address}")
-    print(f"Miner Node Running at: {MINER_HOST}:{MINER_PORT}")
-    print(f"Difficulty Adjustment Interval: {blockchain.DIFFICULTY_ADJUSTMENT_INTERVAL} blocks")
-    print(f"Target Block Time: {blockchain.TARGET_BLOCK_TIME_SECONDS} seconds")
-    print("Waiting for peers to synchronize blockchain...")
+    logging.info("\n" + "="*40)
+    logging.info("      ARTHACHAIN MINER STARTED")
+    logging.info("="*40)
+    logging.info(f"Miner Address: {miner_address}")
+    logging.info(f"Miner Node Running at: {MINER_HOST}:{MINER_PORT}")
+    logging.info(f"Difficulty Adjustment Interval: {blockchain.DIFFICULTY_ADJUSTMENT_INTERVAL} blocks")
+    logging.info(f"Target Block Time: {blockchain.TARGET_BLOCK_TIME_SECONDS} seconds")
+    logging.info("Waiting for peers to synchronize blockchain...")
 
-    # Give the node time to connect to bootstrap peers and synchronize blockchain
-    # The node.start() method already kicks off connect_and_sync_initial.
-    # We'll wait a bit here to ensure some initial sync happens before mining starts.
-    time.sleep(10) # Give more time for initial sync to happen
+    time.sleep(10)
 
-    print("\nStarting Proof of Work mining process...")
+    logging.info("\nStarting Proof of Work mining process...")
 
     try:
         while True:
-            # We don't need to call sync_blockchain_from_known_peers() here
-            # at the beginning of *every* loop iteration, as the node's
-            # internal threads handle passive sync and the PoW loop
-            # now calls it periodically itself.
-            
             last_block = blockchain.last_block
-            print(f"\nLast block: #{last_block['index']} (Hash: {node.blockchain.hash_block(last_block)[:10]}...)")
-            print(f"Current Difficulty Target: {hex(blockchain.get_current_difficulty())}")
-            print(f"Pending transactions: {len(blockchain.pending_transactions)}")
+            
+            if last_block is None:
+                logging.warning("Blockchain is empty. Waiting for genesis block to be created or synced.")
+                time.sleep(5)
+                continue
 
-            # --- Perform Proof of Work ---
-            # Pass the node instance to proof_of_work so it can trigger syncs
+            logging.info(f"\nLast block: #{last_block['index']} (Hash: {node.blockchain.hash_block(last_block)[:10]}...)")
+            logging.info(f"Current Difficulty Target: {hex(blockchain.get_current_difficulty())}")
+            logging.info(f"Pending transactions: {len(blockchain.pending_transactions)}")
+
             nonce = proof_of_work(last_block, blockchain, node) 
             
-            # If nonce is None, it means a new block was found by someone else
-            # while we were mining. So, we restart the mining loop immediately.
             if nonce is None:
                 continue 
 
-            # After finding PoW, ensure our chain is still the longest before creating a block
-            # Another node might have mined a block while we were calculating our nonce.
-            # This is a critical check for preventing stale blocks.
-            node.sync_blockchain_from_known_peers() # Resync again just before adding
+            node.sync_blockchain_from_known_peers()
             if blockchain.last_block['index'] != last_block['index']:
-                print("Blockchain updated by another peer while PoW was found. Discarding our found PoW and restarting mining.")
-                continue # Restart mining loop
+                logging.info("Blockchain updated by another peer while PoW was found. Discarding our found PoW and restarting mining.")
+                continue
 
             previous_hash = blockchain.hash_block(last_block)
             
-            # Create the new block
             new_block = blockchain.new_block(nonce, previous_hash, miner_address)
             
             if new_block:
-                print(f"Block #{new_block['index']} successfully mined and added!")
-                # Broadcast the new block to the network
+                logging.info(f"Block #{new_block['index']} successfully mined and added!")
                 node.broadcast_message('NEW_BLOCK', {'block': new_block})
-                node.last_block_broadcast_time = time.time() # Update broadcast time
+                node.last_block_broadcast_time = time.time()
             else:
-                print("Failed to add new block (perhaps supply limit reached or chain inconsistency).")
+                logging.warning("Failed to add new block (perhaps supply limit reached or chain inconsistency).")
 
-            time.sleep(1) # Small pause before next iteration
+            time.sleep(1)
 
     except KeyboardInterrupt:
-        print("\nMiner stopped by user.")
+        logging.info("\nMiner stopped by user.")
     finally:
         node.stop()
 
 if __name__ == '__main__':
-    # Allow user to specify port from command line arguments
     if len(sys.argv) > 1:
         try:
             MINER_PORT = int(sys.argv[1])
             if not (1024 <= MINER_PORT <= 65535):
                 raise ValueError("Port must be between 1024 and 65535.")
         except ValueError as e:
-            print(f"Port error: {e}. Using default port {MINER_PORT}.")
+            logging.error(f"Port error: {e}. Using default port {MINER_PORT}.")
     
     run_miner()
