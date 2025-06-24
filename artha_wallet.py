@@ -4,7 +4,10 @@ from Crypto.PublicKey import RSA
 from Crypto.Signature import pkcs1_15
 from Crypto.Hash import SHA256
 import os
+import logging # Import logging
 from artha_utils import hash_data, json_serialize, get_data_dir, save_json_file, load_json_file
+
+logger = logging.getLogger(__name__) # Logger for this module
 
 class ArthaWallet:
     def __init__(self, wallet_file='wallet.dat'):
@@ -24,12 +27,12 @@ class ArthaWallet:
                 self.private_key = RSA.import_key(wallet_data['private_key'])
                 self.public_key = RSA.import_key(wallet_data['public_key'])
                 self.address = wallet_data['address']
-                print(f"Wallet loaded from '{self.wallet_file}'. Your address: {self.address}")
+                logger.info(f"Wallet loaded from '{self.wallet_file}'. Your address: {self.address}")
             except (ValueError, KeyError) as e:
-                print(f"Error loading wallet: {e}. Creating a new wallet.")
+                logger.warning(f"Error loading wallet: {e}. Creating a new wallet.")
                 self._generate_new_wallet()
         else:
-            print("Wallet file not found. Creating a new wallet...")
+            logger.info("Wallet file not found. Creating a new wallet...")
             self._generate_new_wallet()
 
     def _generate_new_wallet(self):
@@ -41,7 +44,7 @@ class ArthaWallet:
         self.public_key = key.publickey()
         self.address = self._get_address_from_public_key(self.public_key.export_key().decode('utf-8'))
         self._save_wallet()
-        print(f"New wallet successfully created! Your address: {self.address}")
+        logger.info(f"New wallet successfully created! Your address: {self.address}")
 
     def _save_wallet(self):
         """
@@ -96,8 +99,9 @@ class ArthaWallet:
             return True
         except (ValueError, TypeError):
             # Invalid signature or wrong key
+            logger.debug("Signature verification failed: Invalid format or mismatch.")
             return False
         except Exception as e:
-            print(f"Error verifying signature: {e}")
+            logger.error(f"Unexpected error verifying signature: {e}")
             return False
 
