@@ -1,175 +1,85 @@
 # artha_miner.py
 
 import time
-import hashlib
 import logging
 import os
 import sys
-import getpass # Untuk meminta password secara aman
+import getpass
+import threading
 from artha_blockchain import ArthaBlockchain
 from artha_wallet import ArthaWallet
 from artha_node import ArthaNode
-import threading
 
-# Miner Node Configuration
 MINER_HOST = '0.0.0.0'
 MINER_PORT = 5001
 
-def setup_logging(app_name):
-    """Sets up logging to console and a file."""
+def setup_logging(port):
     log_dir = os.path.join(os.path.expanduser("~"), ".artha_chain", "logs")
     os.makedirs(log_dir, exist_ok=True)
-    log_file_path = os.path.join(log_dir, f"{app_name}.log")
-
+    log_file_path = os.path.join(log_dir, f"artha_miner_{port}.log")
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
+    if root_logger.handlers: [h.close() for h in root_logger.handlers[:]]; root_logger.handlers = []
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_handler = logging.StreamHandler(sys.stdout); console_handler.setLevel(logging.INFO); console_handler.setFormatter(formatter); root_logger.addHandler(console_handler)
+    file_handler = logging.FileHandler(log_file_path, mode='w'); file_handler.setLevel(logging.DEBUG); file_handler.setFormatter(formatter); root_logger.addHandler(file_handler)
 
-    if root_logger.handlers:
-        for handler in root_logger.handlers[:]:
-            root_logger.removeHandler(handler)
-
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO) # Keep INFO for miner output
-    formatter_console = logging.Formatter('%(levelname)s: %(message)s')
-    console_handler.setFormatter(formatter_console)
-    root_logger.addHandler(console_handler)
-
-    file_handler = logging.FileHandler(log_file_path)
-    file_handler.setLevel(logging.DEBUG)
-    formatter_file = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter_file)
-    root_logger.addHandler(file_handler)
-
-    logging.info(f"Logging configured. Console: INFO+, File ('{log_file_path}'): DEBUG+")
-
-
-def proof_of_work(last_block, blockchain_instance, node_instance):
-    """
-    Algoritma Proof of Work:
-    - Menemukan 'nonce' sehingga hash dari (hash_blok_terakhir + nonce) memenuhi target kesulitan.
-    """
-    if last_block is None:
-        logging.error("proof_of_work menerima last_block yang None. Tidak bisa melanjutkan.")
-        return None
-
-    last_block_hash = blockchain_instance.hash_block(last_block)
-    difficulty = blockchain_instance.get_current_difficulty()
+def mine_a_block(blockchain, miner_address):
+    last_block = blockchain.last_block
+    if not last_block: return None
+    previous_hash = blockchain.hash_block(last_block)
     nonce = 0
-    start_time = time.time()
-    
-    # Check if another node has already found a block while we were setting up
-    if blockchain_instance.last_block['index'] != last_block['index']:
-        logging.info("Rantai telah diperbarui sebelum PoW dimulai. Memulai ulang pencarian.")
-        return None
-
-    logging.info(f"Memulai Proof of Work untuk blok #{last_block['index'] + 1} dengan kesulitan: {hex(difficulty)}")
-
-    while not blockchain_instance.is_valid_proof(last_block_hash, nonce, difficulty):
+    while not blockchain.is_valid_proof(previous_hash, nonce, blockchain.get_current_difficulty()):
         nonce += 1
+        if blockchain.last_block.get('index') > last_block.get('index'):
+            logging.info("Mining interrupted by new block from network.")
+            return None
+    if blockchain.last_block and blockchain.hash_block(blockchain.last_block) != previous_hash:
+        logging.warning("Mined a block for an orphaned chain. Discarding.")
+        return None
+    return blockchain.new_block(nonce, previous_hash, miner_address)
+
+def mining_worker(blockchain, node, miner_address, new_tx_event):
+    while True:
+        triggered = new_tx_event.wait(timeout=blockchain.TARGET_BLOCK_TIME_SECONDS)
+        if triggered: logging.info("New transaction detected! Triggering mining...")
+        else: logging.info("Timeout reached. Mining a block...")
         
-        # Setiap 100,000 nonce, periksa apakah ada blok baru dari jaringan
-        if nonce % 100000 == 0:
-            # Periksa apakah rantai telah berubah saat menambang (blok lain ditemukan)
-            if blockchain_instance.last_block['index'] != last_block['index']:
-                logging.info("Blok baru diterima dari jaringan saat menambang. Menghentikan PoW saat ini.")
-                return None # Mengindikasikan bahwa penambangan harus dihentikan dan dimulai ulang
-
-            logging.debug(f"  Penambang bekerja... mencoba {nonce} nonces. Waktu berlalu: {time.time() - start_time:.2f}s")
-            
-    end_time = time.time()
-    logging.info(f"Proof of Work ditemukan: {nonce} (membutuhkan {end_time - start_time:.2f} detik)")
-    return nonce
-
+        new_block = mine_a_block(blockchain, miner_address)
+        if new_block:
+            if node.handle_own_new_block(new_block):
+                 logging.info(f"Successfully mined and broadcasting block #{new_block['index']}")
+                 node.broadcast_message('NEW_BLOCK', {'block': new_block})
+        
+        if new_tx_event.is_set(): new_tx_event.clear()
+        time.sleep(1)
 
 def run_miner():
-    """
-    Fungsi utama untuk menjalankan penambang ArthaChain.
-    """
-    setup_logging("artha_miner")
-
-    # --- PERUBAHAN KRITIS: Meminta password untuk membuka dompet miner ---
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else MINER_PORT
+    setup_logging(port)
     try:
-        password = getpass.getpass("Masukkan password untuk dompet Miner Anda: ")
-        if not password:
-            print("Password tidak boleh kosong. Keluar.")
-            return
+        password = getpass.getpass("Masukkan password dompet Miner: ")
         wallet = ArthaWallet(password=password)
-    except ValueError as e:
-        print(f"Gagal memuat dompet miner: {e}")
-        return
-    except (ImportError, EOFError):
-        print("Gagal mengimpor 'getpass'. Harap jalankan di terminal yang mendukungnya.")
-        return
-
+    except Exception as e:
+        print(f"Gagal memuat dompet: {e}"); return
+        
     miner_address = wallet.get_public_address()
     blockchain = ArthaBlockchain()
-    node = ArthaNode(MINER_HOST, MINER_PORT, blockchain, is_miner=True)
+    new_tx_event = threading.Event()
+    node = ArthaNode(MINER_HOST, port, blockchain, is_miner=True, new_tx_event=new_tx_event)
     node.start()
-
-    logging.info("\n" + "="*40)
-    logging.info("      PENAMBANG ARTHACHAIN DIMULAI")
-    logging.info("="*40)
-    logging.info(f"Alamat Miner: {miner_address}")
-    logging.info(f"Node Miner Berjalan di: {MINER_HOST}:{MINER_PORT}")
-    logging.info("Menunggu peer untuk sinkronisasi blockchain...")
-
-    time.sleep(10) # Beri waktu untuk sinkronisasi awal
-
-    logging.info("\nMemulai proses penambangan Proof of Work...")
-
+    
+    logging.info(f"\nPENAMBANG HYBRID DIMULAI\nAlamat: {miner_address}\nNode di: {MINER_HOST}:{port}")
+    logging.info(f"Menambang setiap ada transaksi ATAU setiap ~{blockchain.TARGET_BLOCK_TIME_SECONDS} detik.")
+    
+    miner_thread = threading.Thread(target=mining_worker, args=(blockchain, node, miner_address, new_tx_event), daemon=True)
+    miner_thread.start()
+    
     try:
-        while True:
-            last_block = blockchain.last_block
-            
-            if last_block is None:
-                logging.warning("Blockchain kosong. Menunggu blok genesis dibuat atau disinkronkan.")
-                time.sleep(5)
-                continue
-
-            previous_hash_for_new_block = blockchain.hash_block(last_block)
-
-            logging.info(f"\nMenambang di atas blok: #{last_block['index']} (Hash: {previous_hash_for_new_block[:10]}...)")
-            logging.info(f"Kesulitan saat ini: {hex(blockchain.get_current_difficulty())}")
-            logging.info(f"Transaksi tertunda: {len(blockchain.pending_transactions)}")
-
-            nonce = proof_of_work(last_block, blockchain, node) 
-            
-            if nonce is None:
-                logging.info("PoW dibatalkan atau gagal. Memulai ulang siklus penambangan...")
-                time.sleep(2) # Jeda singkat sebelum mencoba lagi
-                continue 
-
-            # Pemeriksaan Kritis: Setelah menemukan PoW, periksa lagi apakah rantai telah berubah.
-            # Jika hash dari blok terakhir di rantai *tidak lagi sama* dengan hash yang kita gunakan untuk memulai,
-            # berarti orang lain telah menemukan blok lebih dulu.
-            if blockchain.hash_block(blockchain.last_block) != previous_hash_for_new_block:
-                logging.warning("Rantai diperbarui oleh peer lain TEPAT saat PoW ditemukan. Membuang blok kita dan memulai ulang.")
-                continue
-
-            # Jika kita sampai di sini, PoW kita valid untuk ujung rantai saat ini.
-            new_block = blockchain.new_block(nonce, previous_hash_for_new_block, miner_address)
-            
-            if new_block:
-                logging.info(f"Blok #{new_block['index']} berhasil ditambang dan ditambahkan!")
-                node.broadcast_message('NEW_BLOCK', {'block': new_block})
-                node.last_block_broadcast_time = time.time()
-            else:
-                logging.warning("Gagal menambahkan blok baru (mungkin batas pasokan tercapai).")
-
-            time.sleep(1) # Jeda untuk mencegah penggunaan CPU 100% jika kesulitan sangat rendah
-
+        while True: time.sleep(60)
     except KeyboardInterrupt:
-        logging.info("\nPenambang dihentikan oleh pengguna.")
-    finally:
-        node.stop()
+        logging.info("\nPenambang dihentikan.")
+    finally: node.stop()
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        try:
-            MINER_PORT = int(sys.argv[1])
-            if not (1024 <= MINER_PORT <= 65535):
-                raise ValueError("Port harus antara 1024 dan 65535.")
-        except ValueError as e:
-            logging.error(f"Kesalahan port: {e}. Menggunakan port default {MINER_PORT}.")
-    
     run_miner()
