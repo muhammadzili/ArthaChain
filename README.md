@@ -73,17 +73,18 @@ Jalankan semua node di satu komputer untuk pengujian cepat.
 
 Terminal 1 - Jalankan Miner:
 
-python3 artha_miner.py 5001
+`python3 artha_miner.py 5001`
+
 Terminal 2 - Jalankan GUI:
 
-python3 arthacore_gui.py 5002
+'python3 arthacore_gui.py 5002'
 GUI akan terhubung otomatis ke miner di port 5001.
 
 🌐 Skenario B: Miner di Server/VPS
 Langkah di Server:
 
-#### sudo ufw allow 5001/tcp
-#### python3 artha_miner.py 5001
+`sudo ufw allow 5001/tcp`
+`python3 artha_miner.py 5001`
 
 Langkah di Klien Lokal:
 
@@ -96,7 +97,7 @@ BOOTSTRAP_PEERS = [
 
 Lalu jalankan GUI:
 
-#### python3 arthacore_gui.py 5002
+`python3 arthacore_gui.py 5002`
 
 ### 4. 💸 Melakukan Transaksi
 Setelah miner menambang blok dan mendapat reward:
