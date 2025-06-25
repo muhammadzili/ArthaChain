@@ -1,57 +1,51 @@
-# ArthaChain: Blockchain & Mata Uang Kripto dengan Python
 
-## Deskripsi Proyek
+# 🚀 ArthaChain: Blockchain & Mata Uang Kripto dengan Python
 
-**ArthaChain** adalah sebuah implementasi proyek blockchain yang dibangun dari dasar menggunakan Python. Proyek ini mensimulasikan fungsionalitas inti dari mata uang kripto seperti Bitcoin, mencakup dompet digital, transaksi peer-to-peer, proses penambangan (*mining*), dan mekanisme konsensus sederhana.
+![Python](https://img.shields.io/badge/Python-3.7%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Status](https://img.shields.io/badge/status-Beta-orange)
 
-Dibuat sebagai alat pembelajaran yang mendalam, ArthaChain bertujuan untuk mendemistifikasi teknologi di balik blockchain. Proyek ini dilengkapi dengan antarmuka pengguna grafis (GUI) **ArthaCore** yang intuitif, dompet yang dienkripsi dengan password, dan kemampuan untuk menjalankan beberapa node yang saling terhubung dalam jaringan terdesentralisasi.
+---
+
+## 📘 Deskripsi Proyek
+
+**ArthaChain** adalah implementasi nyata dari sistem **blockchain** dan **mata uang kripto** yang dibangun sepenuhnya dari dasar menggunakan bahasa pemrograman Python. Proyek ini bukan hanya simulasi, tapi didesain dengan standar keamanan tinggi dan struktur modular, sehingga **dapat dikembangkan untuk penggunaan transaksi nyata (real-world transactions)** di lingkungan terkontrol.
+
+Fitur-fitur inti seperti dompet terenkripsi, transaksi P2P, penambangan blok melalui mekanisme *Proof-of-Work*, dan sinkronisasi jaringan P2P menjadikan ArthaChain sebagai solusi edukatif sekaligus dasar potensial untuk sistem blockchain ringan dan terdesentralisasi.
 
 ---
 
 ## 🎯 Tujuan & Filosofi
 
-Tujuan utama dari ArthaChain adalah sebagai **platform edukasi** bagi siapa saja yang ingin memahami _bagaimana cara kerja blockchain_ secara **praktis**, bukan hanya teori. Dengan melihat dan menjalankan kode ini, pengguna dapat belajar tentang:
+ArthaChain dibuat dengan dua semangat utama:
 
-- **🔐 Kriptografi Kunci Publik**  
-  Bagaimana pasangan kunci privat dan publik digunakan untuk mengamankan kepemilikan aset digital dan mengotorisasi transaksi.
+1. **Edukasi Praktis:** Menyediakan alat pembelajaran untuk memahami cara kerja blockchain secara end-to-end.
+2. **Penggunaan Nyata:** Membangun pondasi teknologi yang dapat digunakan untuk sistem transaksi digital privat atau komunitas tertutup secara riil dan aman.
 
-- **📦 Struktur Data Blockchain**  
-  Konsep rantai blok yang saling terhubung secara kriptografis (`previous_hash`) yang membuatnya sangat sulit untuk dimodifikasi.
+---
 
-- **⛏️ Mekanisme Konsensus**  
-  Simulasi sederhana dari *Proof-of-Work (PoW)* di mana para penambang bersaing untuk menambahkan blok baru ke blockchain.
+## 🔐 Teknologi Inti
 
-- **🌐 Jaringan P2P**  
-  Bagaimana node dalam jaringan terdesentralisasi berkomunikasi untuk menyebarkan transaksi, menyiarkan blok baru, dan menjaga sinkronisasi buku besar (*ledger*).
+- **Dompet Digital Aman:** Menggunakan AES-GCM dan Scrypt untuk enkripsi kunci privat.
+- **Transaksi Peer-to-Peer:** Antar dompet langsung tanpa perantara.
+- **Proof-of-Work:** Penambangan blok dilakukan berdasarkan tingkat kesulitan otomatis.
+- **Jaringan Terdesentralisasi:** Node-node bekerja mandiri, saling sinkronisasi tanpa server pusat.
+- **Supply Terbatas:** Total 30.000.000 ARTH, reward tetap 50 ARTH per blok.
+- **Real-Time GUI:** Antarmuka desktop interaktif dan CLI untuk keperluan server/headless.
 
 ---
 
 ## ⚙️ Fitur Utama
 
-- **🔐 Dompet Terenkripsi Kuat**  
-  Kunci privat tidak pernah disimpan sebagai teks biasa. `wallet.dat` dienkripsi menggunakan AES-GCM + Scrypt, hanya dapat dibuka dengan password.
-
-- **🌐 Jaringan Peer-to-Peer (P2P)**  
-  Node dapat menemukan dan berkomunikasi melalui mekanisme bootstrap peer tanpa server pusat.
-
-- **⛏️ Penambangan Proof-of-Work (PoW)**  
-  Miner bersaing untuk menemukan `nonce` yang valid untuk sebuah blok, menjaga keamanan jaringan.
-
-- **📈 Penyesuaian Kesulitan Otomatis**  
-  Setiap 10 blok, sistem menyesuaikan kesulitan agar waktu rata-rata blok tetap ~60 detik.
-
-- **💰 Pasokan Terbatas**  
-  Total suplai ARTH dibatasi hingga 30.000.000 koin dengan reward 50 ARTH per blok.
-
-- **🖥️ GUI ArthaCore (Tkinter Desktop App)**  
-  - Melihat saldo & alamat wallet  
-  - Mengirim ARTH  
-  - Melihat riwayat transaksi  
-  - Mengecek blok terbaru & transaksi tertunda  
-  - Menelusuri data wallet lain di jaringan
-
-- **📟 CLI App (artha_app.py)**  
-  Alternatif antarmuka baris perintah untuk pengguna tingkat lanjut atau server headless.
+- 🔐 Dompet digital dengan password dan enkripsi kuat  
+- 🧠 Konsensus Proof-of-Work (PoW)  
+- 🌐 Jaringan P2P tanpa pusat  
+- ⏱ Penyesuaian otomatis kesulitan setiap 10 blok  
+- 📦 Transaksi riil antar dompet  
+- 💼 GUI dan CLI untuk fleksibilitas penggunaan  
+- 🔍 Eksplorasi alamat dan blok secara lokal  
+- 🧾 Riwayat transaksi yang transparan  
+- 🧰 Dukungan multi-node untuk simulasi atau produksi kecil
 
 ---
 
@@ -64,73 +58,98 @@ Tujuan utama dari ArthaChain adalah sebagai **platform edukasi** bagi siapa saja
 
 ### 2. Instalasi Dependensi
 
-#### pip install pycryptodome ttkthemes
+```bash
+pip install pycryptodome ttkthemes
+```
 
-### 3. Menjalankan Jaringan
-
-🔁 Skenario A: Simulasi Lokal
-Jalankan semua node di satu komputer untuk pengujian cepat.
+### 3. Simulasi Lokal (Testing)
 
 Terminal 1 - Jalankan Miner:
-
-`python3 artha_miner.py 5001`
+```bash
+python3 artha_miner.py 5001
+```
 
 Terminal 2 - Jalankan GUI:
+```bash
+python3 arthacore_gui.py 5002
+```
 
-'python3 arthacore_gui.py 5002'
-GUI akan terhubung otomatis ke miner di port 5001.
+> GUI akan otomatis terhubung ke miner dan mulai menyinkronkan blok.
 
-🌐 Skenario B: Miner di Server/VPS
-Langkah di Server:
+### 4. Jalankan di VPS (Penggunaan Semi-Produksi)
 
-`sudo ufw allow 5001/tcp`
-`python3 artha_miner.py 5001`
+**Di server/VPS:**
+```bash
+sudo ufw allow 5001/tcp
+python3 artha_miner.py 5001
+```
 
-Langkah di Klien Lokal:
-
-Edit file artha_node.py, ubah bagian BOOTSTRAP_PEERS:
-
+**Di komputer lokal:**
+Ubah `BOOTSTRAP_PEERS` di `artha_node.py`:
+```python
 BOOTSTRAP_PEERS = [
     'IP_PUBLIK_VPS_ANDA:5001',
     '127.0.0.1:5001',
 ]
+```
 
 Lalu jalankan GUI:
+```bash
+python3 arthacore_gui.py 5002
+```
 
-`python3 arthacore_gui.py 5002`
+---
 
-### 4. 💸 Melakukan Transaksi
-Setelah miner menambang blok dan mendapat reward:
+## 💸 Transaksi Real-Time
 
-Gunakan GUI untuk mengirim ARTH dari dompet miner ke dompet klien.
+1. Setelah penambangan berjalan, wallet miner akan menerima reward ARTH.
+2. Kirim ARTH ke dompet klien lain via GUI.
+3. Transaksi akan masuk ke antrean dan dikonfirmasi saat blok baru ditambang.
+4. Riwayat transaksi, saldo, dan detail blok bisa dilihat langsung dari GUI.
 
-Transaksi akan muncul di daftar Transaksi Tertunda.
+> **Catatan:** Semua transaksi diproses secara lokal dan peer-to-peer. Tidak ada penyimpanan cloud atau pihak ketiga yang terlibat.
 
-Setelah blok berikutnya ditambang, transaksi akan terkonfirmasi.
+---
 
-### 📂 Struktur Proyek
+## 📁 Struktur Proyek
 
+```text
 ArthaChain/
 ├── artha_blockchain.py      # Struktur Blockchain & Blok
 ├── artha_wallet.py          # Wallet dan enkripsi
 ├── artha_node.py            # Logika jaringan P2P
 ├── artha_miner.py           # Penambangan PoW
-├── arthacore_gui.py         # Aplikasi GUI
-├── artha_app.py             # CLI App
+├── arthacore_gui.py         # Aplikasi GUI (Tkinter)
+├── artha_app.py             # CLI untuk pengguna teknis
 ├── wallet.dat               # File dompet terenkripsi
-├── README.md                # Dokumen ini
-
-📄 Lisensi
-Proyek ini bersifat open-source dan dapat digunakan bebas untuk tujuan edukasi atau pengembangan lebih lanjut. Atau bahkan digunakan untuk transaksi riil
-Lisensi MIT © 2025 by Muhammad Zili.
-
-❤️ Kontribusi
-Kontribusi sangat terbuka! Silakan fork, buat pull request, atau laporkan masalah melalui Issue Tracker.
-
-### 📫 Kontak
-Untuk kolaborasi atau pertanyaan, hubungi:
-📧 person@mzili.my.id
+├── README.md                # Dokumentasi
+```
 
 ---
 
-Jika kamu butuh dalam bentuk file `README.md`, tinggal minta, nanti saya buatkan dan kirimkan
+## 📄 Lisensi
+
+Proyek ini menggunakan **Lisensi MIT** dan bersifat open-source.  
+Dapat digunakan bebas untuk tujuan edukasi, pengembangan lanjutan, atau sistem blockchain internal komunitas.
+
+---
+
+## ❤️ Kontribusi
+
+Kami sangat terbuka untuk kontribusi dari siapa saja!
+
+- Fork proyek ini
+- Buat *pull request*
+- Atau laporkan bug melalui [Issue Tracker](https://github.com/username/ArthaChain/issues)
+
+---
+
+## 📫 Kontak
+
+Untuk kolaborasi, masukan, atau kerja sama:
+
+📧 person@mzili.my.id  
+
+---
+
+> ⚠️ **Disclaimer:** Walaupun proyek ini telah dirancang dengan prinsip keamanan, ArthaChain belum melalui audit keamanan resmi. Untuk penggunaan pada skala besar atau transaksi bernilai tinggi, sangat disarankan dilakukan peninjauan lanjutan.
