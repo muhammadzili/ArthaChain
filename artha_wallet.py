@@ -1,20 +1,21 @@
 # artha_wallet.py
 
+import os
+import logging
 from Crypto.PublicKey import RSA
 from Crypto.Signature import pkcs1_15
 from Crypto.Hash import SHA256
-import os
-import logging
-from artha_utils import hash_data, json_serialize, get_data_dir
+from Crypto.Protocol.KDF import scrypt
+from Crypto.Cipher import AES
+import json
 
-# Perubahan: Tidak lagi menggunakan save/load json file dari utils
-# karena kita butuh penanganan file biner untuk kunci terenkripsi.
+from artha_utils import hash_data, json_serialize, get_data_dir
 
 logger = logging.getLogger(__name__)
 
 class ArthaWallet:
     def __init__(self, wallet_file='wallet.dat', password=None):
-        self.wallet_file_path = os.path.join(get_data_dir(), wallet_file)
+        self.wallet_file = wallet_file
         self.private_key = None
         self.public_key = None
         self.address = None
@@ -26,103 +27,89 @@ class ArthaWallet:
 
     def _load_or_create_wallet(self, password):
         """
-        Memuat dompet dari file terenkripsi atau membuat yang baru jika tidak ada.
+        Memuat dompet dari file terenkripsi atau membuat yang baru.
         """
-        if os.path.exists(self.wallet_file_path):
-            logger.info(f"Loading wallet from '{self.wallet_file_path}'...")
+        wallet_path = os.path.join(get_data_dir(), self.wallet_file)
+        if os.path.exists(wallet_path):
             try:
-                with open(self.wallet_file_path, 'rb') as f:
-                    encrypted_key = f.read()
+                with open(wallet_path, 'r') as f:
+                    wallet_data = json.load(f)
                 
-                # Mencoba mendekripsi private key dengan password yang diberikan
-                self.private_key = RSA.import_key(encrypted_key, passphrase=password)
+                # Dekripsi private key
+                salt = bytes.fromhex(wallet_data['salt'])
+                nonce = bytes.fromhex(wallet_data['nonce'])
+                tag = bytes.fromhex(wallet_data['tag'])
+                ciphertext = bytes.fromhex(wallet_data['ciphertext'])
+
+                key = scrypt(password.encode('utf-8'), salt, 32, N=2**14, r=8, p=1)
+                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                private_key_pem = cipher.decrypt_and_verify(ciphertext, tag)
+                
+                self.private_key = RSA.import_key(private_key_pem)
                 self.public_key = self.private_key.publickey()
-                self.address = self._get_address_from_public_key(self.public_key.export_key())
-                logger.info(f"Wallet loaded successfully. Your address: {self.address}")
-            except (ValueError, IndexError) as e:
-                logger.error(f"Failed to decrypt wallet. Incorrect password or corrupted file. Error: {e}")
-                # Melempar error kembali agar GUI bisa menanganinya
-                raise ValueError("Password salah atau file dompet rusak.")
+                self.address = self._get_address_from_public_key(self.public_key.export_key().decode('utf-8'))
+                logger.info(f"Wallet loaded successfully for address: {self.address}")
+            except (ValueError, KeyError, TypeError) as e:
+                logger.error(f"Failed to load wallet. Incorrect password or corrupted file: {e}")
+                raise ValueError("Incorrect password or corrupted wallet file.")
         else:
             logger.info("Wallet file not found. Creating a new encrypted wallet...")
             self._generate_new_wallet(password)
 
     def _generate_new_wallet(self, password):
         """
-        Membuat pasangan kunci RSA baru dan menyimpannya dalam format terenkripsi.
+        Membuat pasangan kunci baru dan menyimpannya dalam format terenkripsi.
         """
         key = RSA.generate(2048)
         self.private_key = key
         self.public_key = key.publickey()
-        self.address = self._get_address_from_public_key(self.public_key.export_key())
+        self.address = self._get_address_from_public_key(self.public_key.export_key().decode('utf-8'))
         self._save_wallet(password)
-        logger.info(f"New encrypted wallet successfully created! Your address: {self.address}")
+        logger.info(f"New wallet created! Your address: {self.address}")
 
     def _save_wallet(self, password):
         """
-        Menyimpan private key ke file, dienkripsi dengan password.
-        Menggunakan standar industri PKCS#8 dengan scrypt KDF dan AES-128.
+        Menyimpan private key ke file, dienkripsi dengan password menggunakan AES-GCM.
         """
-        if not self.private_key:
-            raise ValueError("Private key is not available to save.")
+        private_key_pem = self.private_key.export_key('PEM')
+        salt = os.urandom(16)
+        key = scrypt(password.encode('utf-8'), salt, 32, N=2**14, r=8, p=1)
+        cipher = AES.new(key, AES.MODE_GCM)
+        ciphertext, tag = cipher.encrypt_and_digest(private_key_pem)
+
+        wallet_data = {
+            'salt': salt.hex(),
+            'nonce': cipher.nonce.hex(),
+            'tag': tag.hex(),
+            'ciphertext': ciphertext.hex()
+        }
         
-        # Ekspor kunci dengan enkripsi
-        encrypted_key = self.private_key.export_key(
-            passphrase=password,
-            pkcs=8,
-            protection="scryptAndAES128-CBC"
-        )
+        filepath = os.path.join(get_data_dir(), self.wallet_file)
+        with open(filepath, 'w') as f:
+            json.dump(wallet_data, f, indent=4)
+        logger.info("Wallet saved securely.")
 
-        with open(self.wallet_file_path, 'wb') as f:
-            f.write(encrypted_key)
-        logger.info(f"Wallet saved securely to '{self.wallet_file_path}'.")
-
-    def _get_address_from_public_key(self, public_key_bytes):
-        """
-        Menurunkan alamat dari public key (hash SHA256 dari public key).
-        Input sekarang adalah bytes, bukan string.
-        """
-        return hash_data(public_key_bytes)
+    def _get_address_from_public_key(self, public_key_str):
+        return hash_data(public_key_str.encode('utf-8'))
 
     def get_public_address(self):
-        """
-        Mengembalikan alamat publik dari dompet ini.
-        """
         return self.address
 
-    def sign_transaction(self, transaction_data, password):
-        """
-        Menandatangani data transaksi menggunakan private key.
-        Password dibutuhkan untuk memastikan otorisasi.
-        """
+    def sign_transaction(self, transaction_data):
         if not self.private_key:
             raise ValueError("Private key not available for signing.")
         
-        # Validasi sederhana: coba gunakan private key. Jika berhasil, password benar.
-        # Ini tidak diperlukan jika private key sudah di-load di memori,
-        # tapi sebagai lapisan keamanan tambahan, kita bisa memastikannya.
-        # Untuk kasus ini, karena private key sudah ada di self.private_key, kita bisa langsung pakai.
-        
         tx_hash = SHA256.new(json_serialize(transaction_data))
         signer = pkcs1_15.new(self.private_key)
-        signature = signer.sign(tx_hash)
-        return signature.hex()
+        return signer.sign(tx_hash).hex()
 
     @staticmethod
     def verify_signature(transaction_data, public_key_str, signature_hex):
-        """
-        Memverifikasi tanda tangan transaksi menggunakan public key.
-        """
         try:
             public_key = RSA.import_key(public_key_str)
             tx_hash = SHA256.new(json_serialize(transaction_data))
-            verifier = pkcs1_15.new(public_key)
-            verifier.verify(tx_hash, bytes.fromhex(signature_hex))
+            pkcs1_15.new(public_key).verify(tx_hash, bytes.fromhex(signature_hex))
             return True
         except (ValueError, TypeError):
-            logger.debug("Signature verification failed: Invalid format or mismatch.")
+            logger.debug("Signature verification failed.")
             return False
-        except Exception as e:
-            logger.error(f"Unexpected error verifying signature: {e}")
-            return False
-
