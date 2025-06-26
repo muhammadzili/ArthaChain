@@ -1,5 +1,3 @@
-# artha_node.py
-
 import socket
 import threading
 import json
@@ -14,17 +12,17 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 GIST_URL = "https://gist.githubusercontent.com/muhammadzili/19fbb07822977ada20ef98cd3e5638c4/raw/e2a2a002e0a2b26797f554a8e4099cf34e70b066/node.json"
-PEER_UPDATE_INTERVAL = 3600  # 1 hour in seconds
-PEER_TIMEOUT = 120  # 2 minutes
-RECONNECT_INTERVAL = 30  # 30 seconds
-HEARTBEAT_INTERVAL = 60  # 1 minute
+PEER_UPDATE_INTERVAL = 3600
+PEER_TIMEOUT = 120
+RECONNECT_INTERVAL = 30
+HEARTBEAT_INTERVAL = 60
 
 class ArthaNode:
     def __init__(self, host, port, blockchain_instance, is_miner=False, new_tx_event=None):
         self.host = host
         self.port = port
         self.blockchain = blockchain_instance
-        self.peers = {}  # {peer_address: {'socket': socket, 'last_seen': timestamp}}
+        self.peers = {}
         self.server_socket = None
         self.is_running = True
         self.is_miner = is_miner
@@ -34,16 +32,12 @@ class ArthaNode:
         self.last_peer_update = 0
         self.bootstrap_peers = []
         
-        # Initial peer list load
         self._fetch_peer_list()
-        
-        # Start maintenance threads
         threading.Thread(target=self._peer_maintenance_loop, daemon=True).start()
         threading.Thread(target=self._message_processing_loop, daemon=True).start()
         threading.Thread(target=self._peer_update_loop, daemon=True).start()
 
     def _fetch_peer_list(self):
-        """Fetch the latest peer list from GitHub Gist"""
         try:
             with urllib.request.urlopen(GIST_URL, timeout=5) as response:
                 data = json.loads(response.read().decode('utf-8'))
@@ -54,25 +48,18 @@ class ArthaNode:
                 return True
         except (URLError, json.JSONDecodeError) as e:
             logger.warning(f"Failed to fetch peer list: {e}")
-            # Fall back to hardcoded peers if available
             with self.lock:
                 if not self.bootstrap_peers:
-                    self.bootstrap_peers = [
-                        '127.0.0.1:5001',
-                        '47.237.125.206:5001'
-                    ]
+                    self.bootstrap_peers = ['127.0.0.1:5001', '47.237.125.206:5001']
             return False
 
     def _peer_update_loop(self):
-        """Periodically update the peer list from Gist"""
         while self.is_running:
             time.sleep(PEER_UPDATE_INTERVAL)
             self._fetch_peer_list()
 
     def _peer_maintenance_loop(self):
-        """Handle peer health checks and reconnections"""
         while self.is_running:
-            # Check for dead peers
             current_time = time.time()
             dead_peers = []
             
@@ -89,7 +76,6 @@ class ArthaNode:
                     del self.peers[peer]
                     logger.warning(f"Peer {peer} timed out and was removed")
             
-            # Reconnect if we have no peers
             if not self.peers and self.is_running:
                 logger.info("No active peers, attempting to reconnect...")
                 self.connect_and_sync_initial()
@@ -97,7 +83,6 @@ class ArthaNode:
             time.sleep(RECONNECT_INTERVAL)
 
     def _message_processing_loop(self):
-        """Process incoming messages from the queue"""
         while self.is_running:
             try:
                 message, peer_address = self.message_queue.get(timeout=1)
@@ -106,13 +91,11 @@ class ArthaNode:
                 continue
 
     def start(self):
-        """Start the node server"""
         threading.Thread(target=self._start_server, daemon=True).start()
         logger.info(f"ArthaChain node started at {self.host}:{self.port}")
         self.connect_and_sync_initial()
 
     def stop(self):
-        """Stop the node gracefully"""
         self.is_running = False
         if self.server_socket:
             try:
@@ -131,7 +114,6 @@ class ArthaNode:
         logger.info(f"Node at {self.host}:{self.port} stopped.")
 
     def _start_server(self):
-        """Start the TCP server"""
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
@@ -157,7 +139,6 @@ class ArthaNode:
             self.server_socket.close()
 
     def _handle_client(self, conn, peer_address):
-        """Handle incoming client connections"""
         with self.lock:
             self.peers[peer_address] = {
                 'socket': conn,
@@ -198,7 +179,6 @@ class ArthaNode:
             logger.info(f"Connection to {peer_address} closed.")
 
     def _process_message(self, message, sender_peer_address):
-        """Process incoming messages"""
         msg_type = message.get('type')
         if not msg_type:
             return
@@ -207,7 +187,7 @@ class ArthaNode:
             if msg_type == 'PING':
                 self.send_message(sender_peer_address, 'PONG', {})
             elif msg_type == 'PONG':
-                pass  # Last seen already updated
+                pass
             elif msg_type == 'NEW_TRANSACTION':
                 tx_data = message['data']
                 tx = tx_data['transaction']
@@ -247,7 +227,6 @@ class ArthaNode:
             logger.error(f"Error processing {msg_type} message: {e}")
 
     def send_message(self, peer_address, message_type, data):
-        """Send a message to a specific peer"""
         message = {
             'type': message_type,
             'data': data,
@@ -278,7 +257,6 @@ class ArthaNode:
             return False
 
     def broadcast_message(self, message_type, data, exclude_peer=None):
-        """Broadcast a message to all peers except the excluded one"""
         with self.lock:
             peers_copy = list(self.peers.keys())
         
@@ -287,7 +265,6 @@ class ArthaNode:
                 self.send_message(peer, message_type, data)
 
     def connect_to_peer(self, host, port):
-        """Connect to a peer node"""
         peer_address = f"{host}:{port}"
         
         if peer_address == f"{self.host}:{self.port}":
@@ -314,8 +291,7 @@ class ArthaNode:
             return False
 
     def connect_and_sync_initial(self):
-        """Connect to bootstrap peers and sync chain"""
-        time.sleep(2)  # Give server time to start
+        time.sleep(2)
         
         with self.lock:
             current_peers = self.bootstrap_peers.copy()
@@ -328,20 +304,17 @@ class ArthaNode:
             except ValueError:
                 logger.warning(f"Invalid peer format: {peer}")
         
-        time.sleep(5)  # Wait for connections to establish
+        time.sleep(5)
         
         if self.peers:
             self.trigger_full_resync()
         else:
             logger.warning("Could not connect to any bootstrap peers.")
-            # Try to refresh peer list if connection failed
             if self._fetch_peer_list():
                 self.connect_and_sync_initial()
 
     def trigger_full_resync(self):
-        """Request full blockchain from peers"""
         self.broadcast_message('REQUEST_CHAIN', {})
 
     def handle_new_block(self, block):
-        """Safely process a new block"""
         return self.blockchain.replace_chain(self.blockchain.chain + [block])
