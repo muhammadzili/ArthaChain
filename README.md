@@ -1,155 +1,154 @@
+# ArthaChain
 
-# 🚀 ArthaChain: Blockchain & Mata Uang Kripto dengan Python
+![ArthaChain Logo](assets/logo.png)
 
-![Python](https://img.shields.io/badge/Python-3.7%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Status](https://img.shields.io/badge/status-Beta-orange)
+> **Platform Blockchain Keuangan Terdesentralisasi Modern**
 
----
-
-## 📘 Deskripsi Proyek
-
-**ArthaChain** adalah implementasi nyata dari sistem **blockchain** dan **mata uang kripto** yang dibangun sepenuhnya dari dasar menggunakan bahasa pemrograman Python. Proyek ini bukan hanya simulasi, tapi didesain dengan standar keamanan tinggi dan struktur modular, sehingga **dapat dikembangkan untuk penggunaan transaksi nyata (real-world transactions)** di lingkungan terkontrol.
-
-Fitur-fitur inti seperti dompet terenkripsi, transaksi P2P, penambangan blok melalui mekanisme *Proof-of-Work*, dan sinkronisasi jaringan P2P menjadikan ArthaChain sebagai solusi edukatif sekaligus dasar potensial untuk sistem blockchain ringan dan terdesentralisasi.
+ArthaChain adalah platform blockchain generasi baru yang dirancang untuk aplikasi keuangan terdesentralisasi (DeFi) dengan fokus pada **kecepatan**, **keamanan**, dan **keberlanjutan**.
 
 ---
 
-## 🎯 Tujuan & Filosofi
+## ✨ Fitur Utama
 
-ArthaChain dibuat dengan dua semangat utama:
-
-1. **Edukasi Praktis:** Menyediakan alat pembelajaran untuk memahami cara kerja blockchain secara end-to-end.
-2. **Penggunaan Nyata:** Membangun pondasi teknologi yang dapat digunakan untuk sistem transaksi digital privat atau komunitas tertutup secara riil dan aman.
-
----
-
-## 🔐 Teknologi Inti
-
-- **Dompet Digital Aman:** Menggunakan AES-GCM dan Scrypt untuk enkripsi kunci privat.
-- **Transaksi Peer-to-Peer:** Antar dompet langsung tanpa perantara.
-- **Proof-of-Work:** Penambangan blok dilakukan berdasarkan tingkat kesulitan otomatis.
-- **Jaringan Terdesentralisasi:** Node-node bekerja mandiri, saling sinkronisasi tanpa server pusat.
-- **Supply Terbatas:** Total 30.000.000 ARTH, reward tetap 50 ARTH per blok.
-- **Real-Time GUI:** Antarmuka desktop interaktif dan CLI untuk keperluan server/headless.
+- 🚀 **Transaksi Cepat**: 2500+ TPS dengan finalitas hanya 2 detik
+- 🔒 **Keamanan Tinggi**: Menggunakan kriptografi modern dan konsensus hybrid
+- 🌱 **Ramah Lingkungan**: 99% lebih hemat energi dibanding PoW tradisional
+- 💰 **Ekonomi Token ARTH**: Total supply 30 juta token dengan distribusi adil
+- ⚡ **Smart Contracts**: Dukungan kontrak pintar dengan bahasa pemrograman yang mudah digunakan
 
 ---
 
-## ⚙️ Fitur Utama
+## 🚀 Cara Penggunaan
 
-- 🔐 Dompet digital dengan password dan enkripsi kuat  
-- 🧠 Konsensus Proof-of-Work (PoW)  
-- 🌐 Jaringan P2P tanpa pusat  
-- ⏱ Penyesuaian otomatis kesulitan setiap 10 blok  
-- 📦 Transaksi riil antar dompet  
-- 💼 GUI dan CLI untuk fleksibilitas penggunaan  
-- 🔍 Eksplorasi alamat dan blok secara lokal  
-- 🧾 Riwayat transaksi yang transparan  
-- 🧰 Dukungan multi-node untuk simulasi atau produksi kecil
+### Persyaratan Sistem
+
+- Python 3.8+
+- pip
+- Git
+
+### Instalasi
+
+1. Clone repository:
+   ```bash
+   git clone https://github.com/muhammadzili/ArthaChain.git
+   cd ArthaChain
+   ```
+
+2. Buat virtual environment:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate      # Linux/MacOS
+   venv\Scripts\activate       # Windows
+   ```
+
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 ---
 
-## 🚀 Cara Menjalankan
+## 🧱 Menjalankan Node
 
-### 1. Prasyarat
-
-- Python `3.7+`
-- PIP (Package Installer for Python)
-
-### 2. Instalasi Dependensi
-
+### Node Reguler
 ```bash
-pip install pycryptodome ttkthemes
+python artha_app.py [PORT]
 ```
 
-### 3. Simulasi Lokal (Testing)
-
-Terminal 1 - Jalankan Miner:
+### Node Miner
 ```bash
-python3 artha_miner.py 5001
+python artha_miner.py [PORT]
 ```
 
-Terminal 2 - Jalankan GUI:
+### GUI Wallet
 ```bash
-python3 arthacore_gui.py 5002
+python arthacore_gui.py [PORT]
 ```
 
-> GUI akan otomatis terhubung ke miner dan mulai menyinkronkan blok.
+### Opsi Command Line
 
-### 4. Jalankan di VPS (Penggunaan Semi-Produksi)
-
-**Di server/VPS:**
-```bash
-sudo ufw allow 5001/tcp
-python3 artha_miner.py 5001
-```
-
-**Di komputer lokal:**
-Ubah `BOOTSTRAP_PEERS` di `artha_node.py`:
-```python
-BOOTSTRAP_PEERS = [
-    'IP_PUBLIK_VPS_ANDA:5001',
-    '127.0.0.1:5001',
-]
-```
-
-Lalu jalankan GUI:
-```bash
-python3 arthacore_gui.py 5002
-```
+| Parameter | Deskripsi                    | Default |
+|----------|-------------------------------|---------|
+| `PORT`   | Port untuk menjalankan node   | `5000`  |
 
 ---
 
-## 💸 Transaksi Real-Time
+## 📁 Struktur Direktori
 
-1. Setelah penambangan berjalan, wallet miner akan menerima reward ARTH.
-2. Kirim ARTH ke dompet klien lain via GUI.
-3. Transaksi akan masuk ke antrean dan dikonfirmasi saat blok baru ditambang.
-4. Riwayat transaksi, saldo, dan detail blok bisa dilihat langsung dari GUI.
-
-> **Catatan:** Semua transaksi diproses secara lokal dan peer-to-peer. Tidak ada penyimpanan cloud atau pihak ketiga yang terlibat.
-
----
-
-## 📁 Struktur Proyek
-
-```text
-ArthaChain/
-├── artha_blockchain.py      # Struktur Blockchain & Blok
-├── artha_wallet.py          # Wallet dan enkripsi
-├── artha_node.py            # Logika jaringan P2P
-├── artha_miner.py           # Penambangan PoW
-├── arthacore_gui.py         # Aplikasi GUI (Tkinter)
-├── artha_app.py             # CLI untuk pengguna teknis
-├── wallet.dat               # File dompet terenkripsi
-├── README.md                # Dokumentasi
+```
+arthachain/
+├── artha_app.py         # Aplikasi CLI utama
+├── artha_miner.py       # Node penambang
+├── arthacore_gui.py     # Antarmuka GUI
+├── artha_blockchain.py  # Implementasi blockchain
+├── artha_wallet.py      # Manajemen wallet
+├── artha_node.py        # Jaringan P2P
+├── artha_utils.py       # Fungsi utilitas
+├── requirements.txt     # Dependensi
+└── README.md            # Dokumentasi
 ```
 
 ---
 
 ## 📄 Lisensi
 
-Proyek ini menggunakan **Lisensi MIT** dan bersifat open-source.  
-Dapat digunakan bebas untuk tujuan edukasi, pengembangan lanjutan, atau sistem blockchain internal komunitas.
+ArthaChain dilisensikan di bawah Lisensi MIT:
+
+```
+Copyright (c) 2025 Muhammad Zili
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ---
 
-## ❤️ Kontribusi
+## 📦 Status Proyek
 
-Kami sangat terbuka untuk kontribusi dari siapa saja!
-
-- Fork proyek ini
-- Buat *pull request*
-- Atau laporkan bug melalui [Issue Tracker](https://github.com/username/ArthaChain/issues)
+**Status Release: v1.7**
 
 ---
 
-## 📫 Kontak
+## 👨‍💻 Pengembang
 
-Untuk kolaborasi, masukan, atau kerja sama:
-
-📧 person@mzili.my.id  
+**Muhammad Zili**  
+📧 Email: person@mzili.my.id  
+🌐 GitHub: [github.com/muhammadzili](https://github.com/muhammadzili)  
+🔗 Instagram: [https://www.instagram.com/mhmdszuli/](https://www.instagram.com/mhmdszuli/)
 
 ---
 
-> ⚠️ **Disclaimer:** Walaupun proyek ini telah dirancang dengan prinsip keamanan, ArthaChain belum melalui audit keamanan resmi. Untuk penggunaan pada skala besar atau transaksi bernilai tinggi, sangat disarankan dilakukan peninjauan lanjutan.
+## 🤝 Berkontribusi
+
+Kontribusi sangat diterima! Silakan buka issue atau pull request dengan:
+
+1. Fork repository
+2. Buat branch fitur (`git checkout -b fitur-baru`)
+3. Commit perubahan (`git commit -am 'Tambahkan fitur baru'`)
+4. Push ke branch (`git push origin fitur-baru`)
+5. Buat Pull Request
+
+---
+
+## 💬 Dukungan
+
+Untuk pertanyaan atau dukungan, silakan:
+
+- Buat issue di GitHub
+- Hubungi pengembang melalui email
+- Bergabung dengan komunitas ArthaChain
