@@ -1,0 +1,6 @@
+# Dependensi Inti untuk Kriptografi
+pycryptodome>=3.15.0
+
+# Dependensi untuk GUI Modern
+customtkinter>=5.2.0
+Pillow>=9.3.0
