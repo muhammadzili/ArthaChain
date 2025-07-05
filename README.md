@@ -1,92 +1,105 @@
 # ArthaChain
 
-![ArthaChain Logo](assets/logo.png)
+![Blockchain](https://img.shields.io/badge/Blockchain-PoS-blueviolet)
+![Status](https://img.shields.io/badge/Status-Stable-brightgreen)
+![License](https://img.shields.io/badge/License-MIT-yellow) 
+![ArthaChain](https://img.shields.io/badge/Project-ArthaChain-blue)
 
-> **Platform Blockchain Keuangan Terdesentralisasi Modern**
+> **Platform Blockchain Proof of Stake yang Cepat, Efisien, dan Modern**
 
-ArthaChain adalah platform blockchain generasi baru yang dirancang untuk aplikasi keuangan terdesentralisasi (DeFi) dengan fokus pada **kecepatan**, **keamanan**, dan **keberlanjutan**.
+**ArthaChain** adalah platform blockchain generasi baru yang mengadopsi mekanisme konsensus **Proof of Stake (PoS)**. Dirancang dengan fokus pada kecepatan transaksi, efisiensi energi, dan kemudahan penggunaan, ArthaChain siap menjadi fondasi untuk ekosistem DeFi dan aplikasi blockchain modern.
 
 ---
 
 ## ✨ Fitur Utama
 
-- 🚀 **Transaksi Cepat**: 2500+ TPS dengan finalitas hanya 2 detik
-- 🔒 **Keamanan Tinggi**: Menggunakan kriptografi modern dan konsensus hybrid
-- 🌱 **Ramah Lingkungan**: 99% lebih hemat energi dibanding PoW tradisional
-- 💰 **Ekonomi Token ARTH**: Total supply 30 juta token dengan distribusi adil
-- ⚡ **Smart Contracts**: Dukungan kontrak pintar dengan bahasa pemrograman yang mudah digunakan
+- 🚀 **Blok Cepat & Konsisten**  
+  Blok baru dibuat setiap **10 detik**, memastikan transaksi dikonfirmasi secara cepat dan dapat diprediksi.
+
+- 🔒 **Konsensus Proof of Stake**  
+  Mengganti sistem Proof of Work yang boros energi dengan PoS yang lebih efisien. Validator dipilih secara bergiliran untuk membuat blok.
+
+- 🌱 **Ramah Lingkungan**  
+  Konsumsi energi sangat rendah — hingga 99% lebih hemat dibanding PoW.
+
+- 💻 **Antarmuka GUI Modern**  
+  Dibangun dengan `customtkinter`, GUI ArthaChain mencakup:
+  - Dashboard dompet pribadi.
+  - Explorer jaringan dan histori transaksi.
+  - Visualisasi real-time blok & mempool.
+
+- 💰 **Ekonomi Token ARTH**  
+  Validator mendapat reward dari blok baru, menjaga stabilitas ekonomi jaringan dan memotivasi partisipasi.
 
 ---
 
-## 🚀 Cara Penggunaan
-
-### Persyaratan Sistem
-
-- Python 3.8+
-- pip
-- Git
-
-### Instalasi
-
-1. Clone repository:
-   ```bash
-   git clone https://github.com/muhammadzili/ArthaChain.git
-   cd ArthaChain
-   ```
-
-2. Buat virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate      # Linux/MacOS
-   venv\Scripts\activate       # Windows
-   ```
-
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
----
-
-## 🧱 Menjalankan Node
-
-### Node Reguler
-```bash
-python artha_app.py [PORT]
-```
-
-### Node Miner
-```bash
-python artha_miner.py [PORT]
-```
-
-### GUI Wallet
-```bash
-python arthacore_gui.py [PORT]
-```
-
-### Opsi Command Line
-
-| Parameter | Deskripsi                    | Default |
-|----------|-------------------------------|---------|
-| `PORT`   | Port untuk menjalankan node   | `5000`  |
-
----
-
-## 📁 Struktur Direktori
+## 🧱 Struktur Proyek
 
 ```
 arthachain/
-├── artha_app.py         # Aplikasi CLI utama
-├── artha_miner.py       # Node penambang
-├── arthacore_gui.py     # Antarmuka GUI
-├── artha_blockchain.py  # Implementasi blockchain
-├── artha_wallet.py      # Manajemen wallet
-├── artha_node.py        # Jaringan P2P
-├── artha_utils.py       # Fungsi utilitas
-├── requirements.txt     # Dependensi
-└── README.md            # Dokumentasi
+├── arthacore_gui_pos.py     # GUI: Dompet & Explorer
+├── artha_validator.py       # Validator: Pembuat blok
+├── artha_app_pos.py         # CLI: Mode pengguna biasa (opsional)
+├── artha_blockchain_pos.py  # Inti Blockchain PoS
+├── artha_node_pos.py        # Komunikasi jaringan P2P
+├── artha_wallet.py          # Dompet: kunci privat/publik
+├── artha_utils.py           # Fungsi hashing, json, dsb.
+└── requirements.txt         # Daftar dependensi
 ```
+
+---
+
+## 🚀 Cara Menjalankan
+
+### 1. Persyaratan
+
+- Python 3.8 atau lebih baru
+- `pip`
+- Git
+
+### 2. Instalasi
+
+```bash
+git clone https://github.com/NAMA_USER_ANDA/ArthaChain.git
+cd ArthaChain
+pip install -r requirements.txt
+```
+
+### 3. Konfigurasi Validator
+
+Jalankan validator untuk membuat dompet pertama Anda:
+
+```bash
+python3 artha_validator.py 5001
+```
+
+Program akan meminta password, lalu menghasilkan alamat validator. Salin alamat tersebut dan tambahkan ke daftar `self.validators` di file `artha_blockchain_pos.py`.
+
+```python
+class ArthaBlockchainPoS:
+    def __init__(self, ...):
+        self.validators = [
+            'ALAMAT_VALIDATOR_ANDA'
+        ]
+```
+
+### 4. Menjalankan Jaringan
+
+**Terminal 1 - Validator:**
+
+```bash
+python3 artha_validator.py 5001
+```
+
+Biarkan berjalan untuk memvalidasi blok.
+
+**Terminal 2 - GUI:**
+
+```bash
+python3 arthacore_gui_pos.py
+```
+
+Masukkan password dompet pengguna. Dompet akan dibuat jika belum ada.
 
 ---
 
@@ -118,11 +131,6 @@ SOFTWARE.
 
 ---
 
-## 📦 Status Proyek
-
-**Status Release: v1.7**
-
----
 
 ## 👨‍💻 Pengembang
 
