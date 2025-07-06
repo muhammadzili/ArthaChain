@@ -23,7 +23,7 @@ class ArthaBlockchainPoS:
         self.known_pending_tx_hashes = set()
 
         self.validators = [
-            'e5c4aba2078eaf36dc11c2e7a00dafa8e02bc39d690b1f063807d99033982590'
+            '330b95ed4fe291f7f475a1a0edbc224143b54c57ed6b577dfb6659bb7aa7ca61'
         ]
 
         self.lock = threading.RLock()
@@ -50,7 +50,7 @@ class ArthaBlockchainPoS:
         genesis_block = {
             'index': 0, 'timestamp': time.time(), 'transactions': [],
             'validator': 'genesis_address', 'previous_hash': '0',
-            'validator_public_key': 'genesis_pub_key', # Field placeholder untuk konsistensi
+            'validator_public_key': 'genesis_pub_key',
             'signature': 'genesis_signature'
         }
         self.chain.append(genesis_block)
@@ -60,7 +60,6 @@ class ArthaBlockchainPoS:
     def new_block(self, validator_wallet):
         with self.lock:
             validator_address = validator_wallet.get_public_address()
-            # --- PERBAIKAN: Sertakan public key di dalam blok ---
             validator_public_key = validator_wallet.public_key.export_key().decode('utf-8')
 
             coinbase_tx = self._create_transaction_object('0', validator_address, self.BLOCK_REWARD, 'coinbase', 'coinbase')
@@ -69,11 +68,10 @@ class ArthaBlockchainPoS:
             block_data = {
                 'index': len(self.chain), 'timestamp': time.time(),
                 'transactions': transactions_for_block, 'validator': validator_address,
-                'validator_public_key': validator_public_key, # <-- KUNCI PUBLIK DITAMBAHKAN
+                'validator_public_key': validator_public_key,
                 'previous_hash': self.hash_block(self.last_block)
             }
             
-            # Validator menandatangani data blok (tanpa signature)
             signature = validator_wallet.sign_transaction(block_data)
             block_data['signature'] = signature
             return block_data
@@ -126,17 +124,12 @@ class ArthaBlockchainPoS:
     def is_chain_valid(self, chain_to_validate):
         logger.debug(f"Validating chain of length {len(chain_to_validate)}")
         try:
-            if not chain_to_validate: 
-                logger.error("Validation failed: Chain is empty.")
-                return False
+            if not chain_to_validate: return False
             
             genesis_block = chain_to_validate[0]
-            if genesis_block['index'] != 0 or genesis_block['previous_hash'] != '0':
-                logger.error("Validation failed: Genesis block is corrupted.")
-                return False
+            if genesis_block['index'] != 0 or genesis_block['previous_hash'] != '0': return False
 
             temp_balances = {}
-
             for i in range(len(chain_to_validate)):
                 block = chain_to_validate[i]
                 
@@ -151,26 +144,21 @@ class ArthaBlockchainPoS:
                         logger.error(f"Validation failed: Wrong validator for block {block['index']}.")
                         return False
 
-                    # --- PERBAIKAN: Verifikasi signature blok ---
+                    # --- PERBAIKAN FINAL: Verifikasi signature blok ---
                     block_to_verify = block.copy()
                     signature = block_to_verify.pop('signature', None)
                     validator_public_key = block_to_verify.get('validator_public_key')
-
-                    if not validator_public_key or not signature:
-                        logger.error(f"Validation failed: Block {block['index']} is missing public key or signature.")
-                        return False
-
+                    if not validator_public_key or not signature: return False
                     if not ArthaWallet.verify_signature(block_to_verify, validator_public_key, signature):
                         logger.error(f"Validation failed: Invalid block signature for block {block['index']}.")
                         return False
                 
                 for tx in block['transactions']:
-                    if tx['sender'] == '0': # Coinbase transaction
+                    if tx['sender'] == '0':
                         temp_balances[tx['recipient']] = temp_balances.get(tx['recipient'], Decimal('0')) + tx['amount']
                         continue
 
                     sender, recipient, amount = tx['sender'], tx['recipient'], tx['amount']
-                    
                     if temp_balances.get(sender, Decimal('0')) < amount:
                         logger.error(f"Validation failed: Insufficient balance for tx {tx['transaction_id'][:10]} in block {block['index']}.")
                         return False
