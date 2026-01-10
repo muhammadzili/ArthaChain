@@ -11,7 +11,7 @@ from urllib.error import URLError
 logger = logging.getLogger(__name__)
 
 # Configuration
-GIST_URL = "https://gist.githubusercontent.com/muhammadzili/19fbb07822977ada20ef98cd3e5638c4/raw/28236276c04401e0ff83e4cdf3af8dd7064b59ca/node.json"
+GIST_URL = "https://gist.githubusercontent.com/muhammadzili/19fbb07822977ada20ef98cd3e5638c4/raw/9ea6b8a0a0c2e16ca4083ab40175af9343ee13f8/node.json"
 PEER_UPDATE_INTERVAL = 3600
 PEER_TIMEOUT = 120
 RECONNECT_INTERVAL = 30
