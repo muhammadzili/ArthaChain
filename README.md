@@ -30,7 +30,7 @@ ArthaChain dibuat dengan dua semangat utama:
 - **Transaksi Peer-to-Peer:** Antar dompet langsung tanpa perantara.
 - **Proof-of-Work:** Penambangan blok dilakukan berdasarkan tingkat kesulitan otomatis.
 - **Jaringan Terdesentralisasi:** Node-node bekerja mandiri, saling sinkronisasi tanpa server pusat.
-- **Supply Terbatas:** Total 30.000.000 ARTH, reward tetap 50 ARTH per blok.
+- **Supply Terbatas:** Total 21.000.000 ARTH, reward 50 ARTH per blok dengan *halving* setiap 210.000 blok.
 - **Real-Time GUI:** Antarmuka desktop interaktif dan CLI untuk keperluan server/headless.
 
 ---
@@ -140,7 +140,7 @@ Kami sangat terbuka untuk kontribusi dari siapa saja!
 
 - Fork proyek ini
 - Buat *pull request*
-- Atau laporkan bug melalui [Issue Tracker](https://github.com/username/ArthaChain/issues)
+- Atau laporkan bug melalui [Issue Tracker](https://github.com/muhammadzili/ArthaChain/issues)
 
 ---
 
@@ -148,8 +148,7 @@ Kami sangat terbuka untuk kontribusi dari siapa saja!
 
 Untuk kolaborasi, masukan, atau kerja sama:
 
-📧 person@mzili.my.id  
-
+📧 zilizero0@gmail.com
 ---
 
 > ⚠️ **Disclaimer:** Walaupun proyek ini telah dirancang dengan prinsip keamanan, ArthaChain belum melalui audit keamanan resmi. Untuk penggunaan pada skala besar atau transaksi bernilai tinggi, sangat disarankan dilakukan peninjauan lanjutan.

@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import getpass
+import threading
 from decimal import Decimal, InvalidOperation
 from artha_blockchain import ArthaBlockchain
 from artha_wallet import ArthaWallet
@@ -44,18 +45,103 @@ def setup_logging(port):
 
 def display_menu():
     """Displays the menu options for the user."""
-    print("\n" + "="*40)
-    print("          ARTHACHAIN MENU")
-    print("="*40)
-    print("1. Show Address & Balance")
-    print("2. Send ARTH")
-    print("3. Show Connected Peers")
-    print("4. Show Blockchain")
-    print("5. Show Pending Transactions")
-    print("6. Force Re-sync with Peers")
-    print("7. View Log File Path")
-    print("8. Exit")
-    print("="*40)
+    print("\n" + "="*46)
+    print("            ARTHACHAIN MENU")
+    print("="*46)
+    print("1.  Alamat & Saldo")
+    print("2.  Kirim ARTH")
+    print("3.  Peer Terhubung")
+    print("4.  Tambah Peer Baru")
+    print("5.  Hapus Peer")
+    print("6.  Daftar Peer Tersimpan")
+    print("7.  Status Sinkronisasi")
+    print("8.  Lihat Blockchain")
+    print("9.  Transaksi Tertunda")
+    print("10. Paksa Sinkronisasi Ulang")
+    print("11. Lokasi File Log")
+    print("12. Keluar")
+    print("="*46)
+
+def show_connected_peers(node):
+    """Print the peers this node currently has an open connection to."""
+    peers = node.get_peer_list()
+    if not peers['connected']:
+        print("\nTidak ada peer yang terhubung.")
+        print("Gunakan menu 'Tambah Peer Baru' atau tunggu sinkronisasi otomatis.")
+        return
+    print("\nPeer yang Terhubung:")
+    for peer in peers['connected']:
+        print(f"- {peer}")
+
+def add_new_peer(node):
+    """Prompt for a peer address and register it."""
+    print("\nMasukkan alamat peer dengan format host:port")
+    print("Contoh: 127.0.0.1:5001  atau  203.0.113.10:5001")
+    peer = input("Alamat peer: ").strip()
+    if not peer:
+        print("Alamat peer tidak boleh kosong.")
+        return
+
+    ok, message = node.add_peer(peer)
+    if ok:
+        print(message)
+        # Ask right away so a fresh peer catches up immediately.
+        sync_after_delay(node)
+    else:
+        print(f"Gagal: {message}")
+
+def sync_after_delay(node, seconds=2):
+    """Give a freshly added peer a moment, then pull whatever chain we lack."""
+    def delayed():
+        time.sleep(seconds)
+        node.trigger_full_resync()
+    threading.Thread(target=delayed, daemon=True).start()
+
+def remove_peer(node):
+    """Remove a manually added peer."""
+    peers = node.get_peer_list()
+    if not peers['manual']:
+        print("\nBelum ada peer manual yang disimpan.")
+        return
+    print("\nPeer manual tersimpan:")
+    for i, peer in enumerate(peers['manual'], 1):
+        print(f"{i}. {peer}")
+    target = input("Hapus peer (nomor atau host:port): ").strip()
+    if target.isdigit() and 1 <= int(target) <= len(peers['manual']):
+        target = peers['manual'][int(target) - 1]
+    ok, message = node.remove_peer(target)
+    print(message if ok else f"Gagal: {message}")
+
+def show_peer_list(node):
+    """Print every peer the node knows about, grouped by source."""
+    peers = node.get_peer_list()
+    print("\n--- Daftar Peer ---")
+    print(f"Terhubung  ({len(peers['connected'])}):")
+    for peer in peers['connected'] or ['-']:
+        print(f"  - {peer}")
+    print(f"Manual     ({len(peers['manual'])}):")
+    for peer in peers['manual'] or ['-']:
+        print(f"  - {peer}")
+    print(f"Bootstrap  ({len(peers['bootstrap'])}):")
+    for peer in peers['bootstrap'] or ['-']:
+        print(f"  - {peer}")
+
+def show_sync_status(node, blockchain):
+    """Compare this node's height against the best height peers reported."""
+    status = node.get_sync_status()
+    height = status['height']
+    best = status['best_known_height']
+
+    print("\n--- Status Sinkronisasi ---")
+    print(f"Node ini        : 0.0.0.0:{node.port}")
+    print(f"Height lokal    : {height}")
+    print(f"Height jaringan : {best}")
+    print(f"Peer terhubung  : {status['peers']}")
+    if status['in_sync']:
+        print("Status          : SINKRON dengan jaringan")
+    else:
+        behind = best - height
+        print(f"Status          : TERTINGGAL {behind} blok, sinkronisasi berjalan...")
 
 def run_app():
     """Main function to run the ArthaChain application."""
@@ -87,7 +173,7 @@ def run_app():
     try:
         while True:
             display_menu()
-            choice = input("Pilih opsi: ")
+            choice = input("Pilih opsi: ").strip()
 
             if choice == '1':
                 balance = blockchain.get_balance(public_address)
@@ -127,39 +213,54 @@ def run_app():
                         'transaction': added_tx,
                         'public_key_str': wallet.public_key.export_key().decode('utf-8')
                     })
+                    # Tell the network we are behind so peers push their tip to us.
+                    node.trigger_full_resync()
                 else:
                     logging.warning("Gagal membuat transaksi.")
             
             elif choice == '3':
-                if not node.peers:
-                    print("\nTidak ada peer yang terhubung.")
-                else:
-                    print("\nPeer yang Terhubung:")
-                    with node.lock:
-                        for peer in node.peers.keys():
-                            print(f"- {peer}")
+                show_connected_peers(node)
 
             elif choice == '4':
-                print("\n--- Blockchain ---")
-                for block in blockchain.chain:
-                    print(f"Index: {block['index']}, Hash: {blockchain.hash_block(block)[:10]}...")
+                add_new_peer(node)
 
             elif choice == '5':
+                remove_peer(node)
+
+            elif choice == '6':
+                show_peer_list(node)
+
+            elif choice == '7':
+                show_sync_status(node, blockchain)
+
+            elif choice == '8':
+                print("\n--- Blockchain ---")
+                last = blockchain.last_block
+                if not last:
+                    print("Chain kosong.")
+                else:
+                    for block in blockchain.chain[-20:]:
+                        print(f"Index: {block['index']}, Hash: {blockchain.hash_block(block)[:10]}...")
+                    print(f"... total {len(blockchain.chain)} blok, tinggi saat ini {last['index']}")
+
+            elif choice == '9':
                 print("\nTransaksi Tertunda:")
                 if not blockchain.pending_transactions:
                     print("Tidak ada.")
                 else:
                     for tx in blockchain.pending_transactions:
                         print(f"- Dari: {tx['sender'][:10]}... Jumlah: {tx['amount']}")
-            
-            elif choice == '6':
+
+            elif choice == '10':
                 print("Memaksa sinkronisasi ulang dengan semua peer...")
                 node.trigger_full_resync()
+                time.sleep(2)
+                show_sync_status(node, blockchain)
 
-            elif choice == '7':
+            elif choice == '11':
                 print(f"\nLokasi file log: {LOG_FILE_PATH}")
 
-            elif choice == '8':
+            elif choice == '12':
                 break
             else:
                 print("Pilihan tidak valid.")
