@@ -51,15 +51,15 @@ def mining_worker(blockchain, node, miner_address, new_tx_event):
     while True:
         # Never mine on a stale tip: catch up first, then produce the next block.
         if node.best_known_height > blockchain.get_current_block_height():
-            logging.info(f"Behind network (have #{blockchain.get_current_block_height()}, "
-                         f"network #{node.best_known_height}). Requesting catch-up.")
+            logging.debug(f"Behind network (have #{blockchain.get_current_block_height()}, "
+                          f"network #{node.best_known_height}). Requesting catch-up.")
             node.trigger_full_resync()
             time.sleep(2)
             continue
 
         triggered = new_tx_event.wait(timeout=blockchain.TARGET_BLOCK_TIME_SECONDS)
-        if triggered: logging.info("New transaction detected! Triggering mining...")
-        else: logging.info("Timeout reached. Mining a block...")
+        if triggered: logging.debug("New transaction detected! Triggering mining...")
+        else: logging.debug("Timeout reached. Mining a block...")
 
         new_block = mine_a_block(blockchain, miner_address)
         if new_block:

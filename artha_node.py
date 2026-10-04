@@ -170,7 +170,7 @@ class ArthaNode:
                         p for p in remote_peers if p not in self.manual_peers
                     ]
                     self.last_peer_update = time.time()
-                logger.info(f"Updated peer list from Gist: {self.bootstrap_peers}")
+                logger.debug(f"Updated peer list from Gist: {self.bootstrap_peers}")
                 return True
         except Exception as e:
             logger.warning(f"Failed to fetch peer list: {e}")
@@ -318,7 +318,7 @@ class ArthaNode:
                 'last_seen': time.time()
             }
 
-        logger.info(f"Connection established with {peer_address}")
+        logger.debug(f"Connection established with {peer_address}")
         # Greet inbound peers immediately so both sides learn each other's height
         # and whoever is behind can start pulling blocks.
         threading.Thread(
@@ -429,7 +429,7 @@ class ArthaNode:
         if peer_tip and last and peer_height == height:
             if peer_tip != self.blockchain.hash_block(last):
                 # Same height, different tip: we are on competing branches.
-                logger.info(
+                logger.debug(
                     f'PeerReports a different tip at height {height} (fork). Comparing chains.'
                 )
                 self._escalate_sync(sender_peer_address)
@@ -506,19 +506,19 @@ class ArthaNode:
             added += 1
             self.broadcast_message('NEW_BLOCK', {'block': block}, exclude_peer=sender)
 
-        if added:
-            height = self.blockchain.get_current_block_height()
-            logger.info(f'Catch-up applied {added} block(s). Height: {height}')
-            # Still behind? Keep pulling until caught up.
-            if self.best_known_height > height:
-                self.request_blocks(height + 1)
+            if added:
+                height = self.blockchain.get_current_block_height()
+                logger.debug(f'Catch-up applied {added} block(s). Height: {height}')
+                # Still behind? Keep pulling until caught up.
+                if self.best_known_height > height:
+                    self.request_blocks(height + 1)
 
     def _handle_chain_response(self, data):
         chain = data.get('chain')
         if not chain:
             return
         if self.blockchain.replace_chain(chain):
-            logger.info(
+            logger.debug(
                 f'Synced from peer up to block #{self.blockchain.get_current_block_height()}'
             )
             # Fork resolved: pull anything newer the winner already has.
@@ -586,7 +586,7 @@ class ArthaNode:
                 args=(sock, peer_address),
                 daemon=True
             ).start()
-            logger.info(f"Connected to peer: {peer_address}")
+            logger.debug(f"Connected to peer: {peer_address}")
             # A fresh link is the moment to reconcile: ask right away instead of
             # waiting for the next block to be broadcast.
             threading.Thread(
@@ -678,7 +678,7 @@ class ArthaNode:
                 return False
             self._last_escalation = now
 
-        logger.info(
+        logger.debug(
             'Blok dari peer tidak menyambung ke chain lokal, '
             'meminta chain penuh untuk resolusi fork.'
         )
@@ -771,6 +771,23 @@ class ArthaNode:
             if self.best_known_height < self.blockchain.get_current_block_height():
                 self.best_known_height = self.blockchain.get_current_block_height()
         return stored
+
+    def invalidate_last_blocks(self, n=1):
+        """Expose blockchain unvalidate/invalidate for RPC/admin usage."""
+        try:
+            return self.blockchain.invalidate_last_blocks(n)
+        except Exception as e:
+            logger.error(f"Error invalidating blocks: {e}")
+            return False
+
+    def unvalidate_last_blocks(self, n=1):
+        return self.invalidate_last_blocks(n)
+
+    def get_pending_transactions(self):
+        try:
+            return self.blockchain.get_pending_transactions()
+        except Exception:
+            return []
 
     def get_sync_status(self):
         """Snapshot of how this node compares to the network."""

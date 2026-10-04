@@ -16,9 +16,6 @@ logger = logging.getLogger(__name__)
 class ArthaWallet:
     def __init__(self, wallet_file='wallet.dat', password=None):
         self.wallet_file = wallet_file
-        self.private_key = None
-        self.public_key = None
-        self.address = None
 
         if not password:
             raise ValueError("Password is required to load or create a wallet.")

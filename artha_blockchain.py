@@ -12,10 +12,10 @@ getcontext().prec = 28
 logger = logging.getLogger(__name__)
 
 class ArthaBlockchain:
-    # Supply config (BTC-like for scarcity & anti-inflation)
-    TOTAL_SUPPLY = Decimal('21000000')  # Hard cap 21M ARTH (langka, anti-inflasi)
-    BLOCK_REWARD_BASE = Decimal('50')
-    HALVING_INTERVAL = 210000  # Halving every 210000 blocks (BTC style)
+    # Constants for ARTH blockchain parameters
+    TOTAL_SUPPLY = Decimal('21000000')  # Total ARTH supply cap
+    BLOCK_REWARD_BASE = Decimal('50')  # Initial block reward
+    HALVING_INTERVAL = 210000  # Number of blocks before reward halves
     TARGET_BLOCK_TIME_SECONDS = 60
     DIFFICULTY_ADJUSTMENT_INTERVAL = 10
 
@@ -187,9 +187,27 @@ class ArthaBlockchain:
                        'timestamp': timestamp or time.time(), 'signature': signature, 'public_key_str': public_key_str}
         
         tx_id = self._calculate_transaction_id(transaction)
-        if tx_id in self.known_pending_tx_hashes: return None
-        
         transaction['transaction_id'] = tx_id
+
+        # Clean stale known entries (tx not pending anymore)
+        if self.known_pending_tx_hashes:
+            # Rebuild known from current pending to avoid stale
+            current_known = {self._calculate_transaction_id(t) for t in self.pending_transactions}
+            self.known_pending_tx_hashes = current_known
+
+        # Check if already pending
+        if tx_id in self.known_pending_tx_hashes:
+            return None
+
+        # Check if already confirmed in chain
+        confirmed_ids = {
+            self._calculate_transaction_id(tx)
+            for block in self.chain for tx in block.get('transactions', [])
+            if tx.get('sender') != '0'
+        }
+        if tx_id in confirmed_ids:
+            return None
+
         self.pending_transactions.append(transaction)
         self.known_pending_tx_hashes.add(tx_id)
         return transaction
@@ -335,7 +353,7 @@ class ArthaBlockchain:
             self._state_cache = state
             self._drop_confirmed_transactions()
             self.save_chain()
-            logger.info(f'Block #{block["index"]} appended. Height: {len(self.chain) - 1}')
+            logger.debug(f'Block #{block["index"]} appended. Height: {len(self.chain) - 1}')
             return True
 
     def _drop_confirmed_transactions(self):
@@ -381,6 +399,46 @@ class ArthaBlockchain:
             return new_work > cur_work
         return new_tip > cur_tip
 
+    def _restore_orphaned_transactions(self, old_chain, new_chain):
+        """Restore non-coinbase transactions from orphaned blocks back to mempool."""
+        try:
+            # Get confirmed tx_ids in new chain
+            confirmed_in_new = set()
+            for block in new_chain:
+                for tx in block.get('transactions', []):
+                    if tx.get('sender') != '0':
+                        confirmed_in_new.add(self._calculate_transaction_id(tx))
+
+            # Collect orphaned txs from old chain (not confirmed in new)
+            orphan_txs = []
+            for block in old_chain:
+                for tx in block.get('transactions', []):
+                    if tx.get('sender') != '0':
+                        tx_id = self._calculate_transaction_id(tx)
+                        if tx_id not in confirmed_in_new:
+                            orphan_txs.append(tx)
+
+            if not orphan_txs:
+                return
+
+            # Merge into pending, avoid duplicates
+            existing_ids = set(self.known_pending_tx_hashes)
+            added = 0
+            for tx in orphan_txs:
+                tx_id = self._calculate_transaction_id(tx)
+                if tx_id not in existing_ids:
+                    # Ensure tx has tx_id
+                    if 'transaction_id' not in tx:
+                        tx['transaction_id'] = tx_id
+                    self.pending_transactions.append(tx)
+                    self.known_pending_tx_hashes.add(tx_id)
+                    existing_ids.add(tx_id)
+                    added += 1
+            if added:
+                logger.info(f'Restored {added} orphaned transaction(s) to mempool')
+        except Exception as e:
+            logger.warning(f'Failed to restore orphaned transactions: {e}')
+
     def replace_chain(self, new_chain):
         """
         Adopt a chain received from a peer when it outranks ours.
@@ -398,6 +456,7 @@ class ArthaBlockchain:
                 )
                 return False
 
+            old_chain = list(self.chain)
             ok, reason, state = self._validate_chain(new_chain)
             if not ok:
                 logger.warning(f'Rejected chain from peer: {reason}')
@@ -406,9 +465,65 @@ class ArthaBlockchain:
             self.chain = new_chain
             self._state_cache = state
             self._drop_confirmed_transactions()
+            # Restore orphaned txs from old chain
+            self._restore_orphaned_transactions(old_chain, self.chain)
             self.save_chain()
             logger.info(f'Chain updated to block #{self.last_block["index"]}.')
             return True
+
+    def get_chain(self):
+        return list(self.chain)
+
+    def get_pending_transactions(self):
+        return list(self.pending_transactions)
+
+    def get_pending_tx_count(self):
+        return len(self.pending_transactions)
+
+    def remove_pending_transactions(self, tx_ids):
+        if not tx_ids:
+            return
+        tx_ids_set = set(tx_ids)
+        self.pending_transactions = [
+            tx for tx in self.pending_transactions
+            if self._calculate_transaction_id(tx) not in tx_ids_set
+        ]
+        self.known_pending_tx_hashes = {
+            self._calculate_transaction_id(tx) for tx in self.pending_transactions
+        }
+
+    def invalidate_last_blocks(self, n=1):
+        """
+        BTC-style: Unvalidate/invalidate last n blocks from tip.
+        Rewinds chain by n blocks. Restores orphaned transactions back to mempool.
+        Backward compatible method name (also add aliases: unvalidate_last_blocks, pop_last_blocks)
+        """
+        if n < 1:
+            return False
+        with self.chain_lock:
+            if len(self.chain) <= 1:  # cannot invalidate genesis
+                return False
+            n = min(n, len(self.chain) - 1)
+            old_chain = list(self.chain)
+            # New chain = old chain without last n blocks
+            new_chain = old_chain[:-n]
+            # Validate the new prefix
+            ok, reason, state = self._validate_chain(new_chain)
+            if not ok:
+                logger.warning(f'Cannot invalidate last {n} blocks: {reason}')
+                return False
+            self.chain = new_chain
+            self._state_cache = state
+            self._drop_confirmed_transactions()
+            self._restore_orphaned_transactions(old_chain, self.chain)
+            self.save_chain()
+            logger.info(f'Invalidated last {n} block(s). New height: {self.get_current_block_height()}')
+            return True
+
+    # Aliases for compatibility
+    unvalidate_last_blocks = invalidate_last_blocks
+    pop_last_blocks = invalidate_last_blocks
+    rewind_to_height = lambda self, height: self.invalidate_last_blocks(self.get_current_block_height() - height) if height >= 0 else False
 
     def save_chain(self):
         save_json_file(self.blockchain_file, self.chain)
