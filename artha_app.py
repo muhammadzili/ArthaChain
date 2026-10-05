@@ -74,7 +74,7 @@ def show_connected_peers(node):
     for peer in peers['connected']:
         print(f"- {peer}")
 
-def add_new_peer(node):
+def add_new_peer(node, blockchain=None):
     """Prompt for a peer address and register it."""
     print("\nMasukkan alamat peer dengan format host:port")
     print("Contoh: 127.0.0.1:5001  atau  203.0.113.10:5001")
@@ -86,18 +86,132 @@ def add_new_peer(node):
     ok, message = node.add_peer(peer)
     if ok:
         print(message)
-        print("Periksa 'Peer Terhubung' (menu 3) dalam beberapa detik...")
-        # Ask right away so a fresh peer catches up immediately.
-        sync_after_delay(node)
+        if blockchain is not None:
+            sync_blockchain_with_animation(node, blockchain, min_wait=2)
     else:
         print(f"Gagal: {message}")
 
-def sync_after_delay(node, seconds=2):
-    """Give a freshly added peer a moment, then pull whatever chain we lack."""
-    def delayed():
-        time.sleep(seconds)
-        node.trigger_full_resync()
-    threading.Thread(target=delayed, daemon=True).start()
+def sync_blockchain_with_animation(node, blockchain, min_wait=3):
+    """
+    Checks network height against local height across all connected peers.
+    If behind, displays a dynamic progress bar animation with speed & ETA
+    until sync is 100% completed and saved to blockchain.json.
+    """
+    print("\n" + "="*46)
+    print("      SINKRONISASI BLOCKCHAIN ARTHACHAIN")
+    print("="*46)
+    print("[+] Memeriksa height blockchain dengan semua peer...")
+    
+    # Broadcast PING to all connected peers right away to fetch their true heights
+    node.broadcast_message('PING', node._chain_summary())
+    # Ask all peers for blocks directly - GET_BLOCKS works for small gaps;
+    # we'll escalate to REQUEST_CHAIN only if stuck.
+    _height_now = blockchain.get_current_block_height()
+    node.request_blocks_from_all_peers(_height_now + 1)
+    
+    start_check = time.time()
+    while time.time() - start_check < min_wait:
+        status = node.get_sync_status()
+        if status['peers'] > 0 and status['best_known_height'] > status['height']:
+            break
+        time.sleep(0.5)
+
+    status = node.get_sync_status()
+    height = status['height']
+    best = status['best_known_height']
+    peers_count = status['peers']
+
+    if peers_count == 0:
+        print(f"[!] Tidak ada peer yang terhubung saat ini.")
+        print(f"    Melanjutkan dengan height lokal (Height: {height}).")
+        print("    (Tips: Tambahkan peer di menu 4 jika ingin terhubung ke jaringan).")
+        print("="*46 + "\n")
+        return True
+
+    if status['in_sync'] and height >= best:
+        print(f"[✓] Blockchain Anda sudah SINKRON dengan jaringan! (Height: {height} | Peer: {peers_count})")
+        print("="*46 + "\n")
+        return True
+
+    total_blocks_to_sync = best - height
+    print(f"[⚡] Height lokal: {height} | Target Jaringan: {best} ({total_blocks_to_sync} blok tertinggal)")
+    print("[🔄] Memproses pengunduhan dan validasi blok ke blockchain.json...")
+
+    start_time = time.time()
+    initial_height = height
+    last_height = height
+    last_progress_time = time.time()
+    stall_count = 0
+    spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+    spin_idx = 0
+
+    try:
+        while True:
+            cur_status = node.get_sync_status()
+            cur_height = cur_status['height']
+            target_height = max(cur_status['best_known_height'], best)
+            best = target_height
+            
+            if cur_height > last_height:
+                last_height = cur_height
+                last_progress_time = time.time()
+                stall_count = 0
+            
+            blocks_synced = cur_height - initial_height
+            total_target = target_height - initial_height
+            
+            if total_target <= 0:
+                pct = 100.0
+            else:
+                pct = min(100.0, max(0.0, (blocks_synced / total_target) * 100.0))
+
+            bar_len = 20
+            filled_len = int(bar_len * pct // 100)
+            bar = '█' * filled_len + '░' * (bar_len - filled_len)
+
+            elapsed = time.time() - start_time
+            speed = blocks_synced / elapsed if elapsed > 0.5 else 0.0
+            
+            remaining_blocks = target_height - cur_height
+            if speed > 0 and remaining_blocks > 0:
+                eta_sec = int(remaining_blocks / speed)
+                m, s = divmod(eta_sec, 60)
+                eta_str = f"{m:02d}:{s:02d}"
+            else:
+                eta_str = "--:--"
+
+            sym = spinner[spin_idx % len(spinner)]
+            spin_idx += 1
+
+            sys.stdout.write(
+                f"\r{sym} Sync: [{bar}] {pct:5.1f}% | Blok: {cur_height}/{target_height} | "
+                f"Spd: {speed:4.1f} blk/s | ETA: {eta_str} | Peer: {cur_status['peers']}  "
+            )
+            sys.stdout.flush()
+
+            if cur_height >= target_height and cur_status['in_sync']:
+                break
+
+            stall_sec = time.time() - last_progress_time
+            if stall_sec > 1.0 and cur_height < target_height:
+                stall_count += 1
+                # Broadcast GET_BLOCKS to ALL peers - fast & incremental.
+                # REQUEST_CHAIN is NOT used here because it blocks the
+                # message loop while verifying RSA sigs for thousands of blocks.
+                node.request_blocks_from_all_peers(cur_height + 1)
+                last_progress_time = time.time()
+
+            time.sleep(0.2)
+
+        sys.stdout.write(f"\r[✓] Sync: [{'█'*bar_len}] 100.0% | Blok: {cur_height}/{best} | Selesai!                          \n")
+        sys.stdout.flush()
+        print(f"[✓] Sinkronisasi Berhasil! Height saat ini: {cur_height} (Tersimpan di blockchain.json)")
+        print("="*46 + "\n")
+        return True
+    except KeyboardInterrupt:
+        print("\n[!] Sinkronisasi diinterupsi oleh pengguna.")
+        print("="*46 + "\n")
+        return False
 
 def remove_peer(node):
     """Remove a manually added peer."""
@@ -172,6 +286,9 @@ def run_app():
     logging.info(f"\nAlamat Dompet: {public_address}")
     logging.info(f"Node Aplikasi Berjalan di: {APP_HOST}:{port}")
 
+    # Auto sync on startup without user typing anything!
+    sync_blockchain_with_animation(node, blockchain, min_wait=3)
+
     try:
         while True:
             display_menu()
@@ -183,6 +300,14 @@ def run_app():
                 print(f"Saldo: {balance:.8f} ARTH")
 
             elif choice == '2':
+                # Check sync status before creating transaction
+                sync_st = node.get_sync_status()
+                if not sync_st['in_sync']:
+                    print("\n[!] Blockchain belum sinkron dengan jaringan. Memulai sinkronisasi...")
+                    if not sync_blockchain_with_animation(node, blockchain, min_wait=1):
+                        print("Transaksi dibatalkan karena sinkronisasi diinterupsi.")
+                        continue
+
                 recipient = input("Alamat penerima: ")
                 try:
                     amount_str = input("Jumlah ARTH: ")
@@ -224,7 +349,7 @@ def run_app():
                 show_connected_peers(node)
 
             elif choice == '4':
-                add_new_peer(node)
+                add_new_peer(node, blockchain)
 
             elif choice == '5':
                 remove_peer(node)
@@ -254,10 +379,7 @@ def run_app():
                         print(f"- Dari: {tx['sender'][:10]}... Jumlah: {tx['amount']}")
 
             elif choice == '10':
-                print("Memaksa sinkronisasi ulang dengan semua peer...")
-                node.trigger_full_resync()
-                time.sleep(2)
-                show_sync_status(node, blockchain)
+                sync_blockchain_with_animation(node, blockchain, min_wait=1)
 
             elif choice == '11':
                 print(f"\nLokasi file log: {LOG_FILE_PATH}")

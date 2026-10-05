@@ -60,6 +60,7 @@ class ArthaNode:
         # Cache of block hashes we already hold, to ignore blocks we already have.
         self._known_block_hashes = set()
         # Highest height any peer has told us about, used to notice we fell behind.
+        self.peer_heights = {}  # {peer_address: height}
         self.best_known_height = 0
         self._sync_lock = threading.Lock()
         self._last_block_request = 0.0
@@ -78,9 +79,28 @@ class ArthaNode:
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
         threading.Thread(target=self._peer_discovery_loop, daemon=True).start()
 
+    def _update_peer_height(self, peer_address, height):
+        if not isinstance(height, int) or height < 0:
+            return
+        with self.lock:
+            self.peer_heights[peer_address] = height
+            highest_peer = max(self.peer_heights.values(), default=0)
+            local_height = self.blockchain.get_current_block_height()
+            self.best_known_height = max(highest_peer, local_height, self.best_known_height)
+
     # ------------------------------------------------------------------
     # Peer list management
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_loopback(host):
+        """True when host is a loopback or local-only address."""
+        if not host or not isinstance(host, str):
+            return True
+        host_lower = host.strip().lower()
+        if host_lower in _LOCAL_HOSTS or host_lower.startswith('127.'):
+            return True
+        return False
 
     def _load_manual_peers(self):
         saved = load_json_file(PEERS_FILE) or {}
@@ -89,7 +109,10 @@ class ArthaNode:
         with self.lock:
             if isinstance(saved, dict):
                 self.manual_peers = list(peers)
-                self.discovered_peers = list(discovered)
+                self.discovered_peers = [
+                    p for p in discovered
+                    if self._parse_peer(p) and not self._is_loopback(self._parse_peer(p)[0])
+                ]
             else:
                 self.manual_peers = list(peers) if peers else []
                 self.discovered_peers = []
@@ -186,6 +209,9 @@ class ArthaNode:
         addr = self._normalize_peer(peer)
         if addr is None:
             return
+        parsed = self._parse_peer(addr)
+        if not parsed or self._is_loopback(parsed[0]):
+            return
         with self.lock:
             known = (
                 self.manual_peers + self.discovered_peers + self.bootstrap_peers
@@ -217,7 +243,8 @@ class ArthaNode:
 
         Connected peers contribute the address they advertised over HELLO. Without
         that we would gossip the ephemeral port their socket arrived on, and every
-        node we told would try to dial a closed port.
+        node we told would try to dial a closed port. Loopback addresses are excluded
+        from gossip so nodes do not try connecting to their own local ports.
         """
         peers = set()
         with self.lock:
@@ -226,12 +253,16 @@ class ArthaNode:
                 candidate = advertised.get(connection_key) or connection_key
                 normalized = self._normalize_peer(candidate)
                 if normalized:
-                    peers.add(normalized)
+                    parsed = self._parse_peer(normalized)
+                    if parsed and not self._is_loopback(parsed[0]):
+                        peers.add(normalized)
             for group in (self.manual_peers, self.bootstrap_peers, self.discovered_peers):
                 for peer in group:
                     normalized = self._normalize_peer(peer)
                     if normalized:
-                        peers.add(normalized)
+                        parsed = self._parse_peer(normalized)
+                        if parsed and not self._is_loopback(parsed[0]):
+                            peers.add(normalized)
         return sorted(peers)[:MAX_SHARED_PEERS]
 
     def _share_peers(self, target_peer):
@@ -364,6 +395,10 @@ class ArthaNode:
         """Close and forget a peer. Caller must hold self.lock."""
         peer_data = self.peers.pop(peer_address, None)
         self._peer_advertised.pop(peer_address, None)
+        self.peer_heights.pop(peer_address, None)
+        highest_peer = max(self.peer_heights.values(), default=0)
+        local_height = self.blockchain.get_current_block_height()
+        self.best_known_height = max(highest_peer, local_height)
         if peer_data:
             try:
                 peer_data['socket'].close()
@@ -548,7 +583,7 @@ class ArthaNode:
                 self._serve_blocks_request(message['data'], sender_peer_address)
 
             elif msg_type == 'BLOCKS':
-                self._handle_blocks_response(message['data'])
+                self._handle_blocks_response(message['data'], sender_peer_address)
 
             elif msg_type == 'REQUEST_CHAIN':
                 self.send_message(sender_peer_address, 'RESPOND_CHAIN', {
@@ -557,7 +592,7 @@ class ArthaNode:
                 })
 
             elif msg_type == 'RESPOND_CHAIN':
-                self._handle_chain_response(message['data'])
+                self._handle_chain_response(message['data'], sender_peer_address)
 
             elif msg_type == 'GET_PEERS':
                 self.send_message(sender_peer_address, 'PEERS', {'peers': self._collect_shareable_peers()})
@@ -609,6 +644,10 @@ class ArthaNode:
         thread looks itself up by that key, so re-keying mid-flight would strand
         the link.
         """
+        peer_h = data.get('height')
+        if isinstance(peer_h, int):
+            self._update_peer_height(sender_peer_address, peer_h)
+
         advertised = self._normalize_peer(data.get('address'))
         if not advertised or advertised == sender_peer_address:
             return
@@ -643,8 +682,7 @@ class ArthaNode:
         height = self.blockchain.get_current_block_height()
 
         if isinstance(peer_height, int):
-            if peer_height > self.best_known_height:
-                self.best_known_height = peer_height
+            self._update_peer_height(sender_peer_address, peer_height)
             if peer_height > height:
                 # Peer is ahead: pull the blocks we are missing.
                 self.request_blocks(height + 1, exclude_peer=sender_peer_address)
@@ -706,20 +744,24 @@ class ArthaNode:
             'to': sender_peer_address,
         })
 
-    def _handle_blocks_response(self, data):
+    def _handle_blocks_response(self, data, sender_peer_address=None):
         """
         Apply a batch of blocks that should extend our tip.
-
-        Blocks we already hold are skipped, not treated as a failure. The same
-        block reaches us twice in a normal network: once through catch-up and
-        once through gossip. Aborting on the first duplicate used to re-request
-        from a cursor that was already behind our tip, which looped forever.
         """
         blocks = data.get('blocks') or []
+        peer_height = data.get('height')
+        sender = sender_peer_address or data.get('to')
+
+        if isinstance(peer_height, int) and sender:
+            self._update_peer_height(sender, peer_height)
+
         if not blocks:
+            height = self.blockchain.get_current_block_height()
+            if height < self.best_known_height and sender:
+                logger.debug(f"Peer {sender} returned 0 blocks for index {height + 1}. Requesting from next best peer.")
+                self.request_blocks(height + 1, exclude_peer=sender, force=True)
             return
 
-        sender = data.get('to')
         added = 0
         for block in blocks:
             if self._has_block(block):
@@ -732,23 +774,25 @@ class ArthaNode:
             added += 1
             self.broadcast_message('NEW_BLOCK', {'block': block}, exclude_peer=sender)
 
-            if added:
-                height = self.blockchain.get_current_block_height()
-                logger.debug(f'Catch-up applied {added} block(s). Height: {height}')
-                # Still behind? Keep pulling until caught up.
-                if self.best_known_height > height:
-                    self.request_blocks(height + 1)
+        if added > 0:
+            height = self.blockchain.get_current_block_height()
+            logger.debug(f'Catch-up applied {added} block(s). Height: {height}')
+            # Still behind? Keep pulling until caught up.
+            if self.best_known_height > height:
+                self.request_blocks(height + 1, force=True)
 
-    def _handle_chain_response(self, data):
+    def _handle_chain_response(self, data, sender_peer_address=None):
         chain = data.get('chain')
         if not chain:
             return
+        if sender_peer_address and isinstance(chain, list):
+            self._update_peer_height(sender_peer_address, len(chain) - 1)
         if self.blockchain.replace_chain(chain):
             logger.debug(
                 f'Synced from peer up to block #{self.blockchain.get_current_block_height()}'
             )
             # Fork resolved: pull anything newer the winner already has.
-            self.request_blocks(self.blockchain.get_current_block_height() + 1)
+            self.request_blocks(self.blockchain.get_current_block_height() + 1, force=True)
 
     # ------------------------------------------------------------------
     # Networking
@@ -846,7 +890,7 @@ class ArthaNode:
             self.send_message(peer_address, 'GET_PEERS', {})
             return True
         except Exception as e:
-            logger.warning(f"Failed to connect to {peer_address}: {e}")
+            logger.debug(f"Failed to connect to {peer_address}: {e}")
             if sock is not None:
                 self._retire_connection(peer_address, sock)
             return False
@@ -904,7 +948,7 @@ class ArthaNode:
             # Let the handshake settle, then ask peers where they're at.
             threading.Thread(target=self._initial_sync, daemon=True).start()
         else:
-            logger.warning("Could not connect to any known peers.")
+            logger.debug("Could not connect to any known peers.")
         return connected
 
     def _prune_dead_discovered(self, results):
@@ -964,8 +1008,22 @@ class ArthaNode:
             peers = [p for p in self.peers.keys() if p != exclude_peer]
         if not peers:
             return False
-        # One peer is enough and avoids N duplicate catch-up batches.
-        self.send_message(peers[0], 'GET_BLOCKS', {'from_index': from_index})
+
+        with self.lock:
+            # Sort peers by their recorded known height in descending order
+            peers_sorted = sorted(
+                peers,
+                key=lambda p: self.peer_heights.get(p, 0),
+                reverse=True
+            )
+
+        target_peer = peers_sorted[0]
+        for p in peers_sorted:
+            if self.peer_heights.get(p, 0) >= from_index:
+                target_peer = p
+                break
+
+        self.send_message(target_peer, 'GET_BLOCKS', {'from_index': from_index})
         return True
 
     def _escalate_sync(self, peer=None, cooldown=SYNC_ESCALATE_COOLDOWN):
@@ -993,13 +1051,34 @@ class ArthaNode:
         return True
 
     def trigger_full_resync(self):
-        """Request the blockchain from peers."""
-        self.request_blocks(self.blockchain.get_current_block_height() + 1, force=True)
-        # Also ask for a full chain so we can recover from a fork.
+        """
+        Pull missing blocks from all connected peers.
+
+        Only sends GET_BLOCKS (incremental, fast). REQUEST_CHAIN (full-chain
+        validation, expensive) is reserved for _escalate_sync / fork resolution.
+        Sending REQUEST_CHAIN here blocks the single-threaded message loop for
+        every RSA signature in the entire chain (potentially 7000+ verifications).
+        """
+        self.request_blocks_from_all_peers(
+            self.blockchain.get_current_block_height() + 1
+        )
+
+    def request_blocks_from_all_peers(self, from_index):
+        """
+        Broadcast GET_BLOCKS to ALL connected peers simultaneously.
+        Used when stuck or as the primary catchup mechanism.
+        Does NOT filter by known peer height so we always try every live link.
+        """
         with self.lock:
             peers = list(self.peers.keys())
+        if not peers:
+            return False
         for peer in peers:
-            self.send_message(peer, 'REQUEST_CHAIN', {})
+            try:
+                self.send_message(peer, 'GET_BLOCKS', {'from_index': from_index})
+            except Exception:
+                pass
+        return True
 
     def _handle_peers_message(self, data):
         peers = data.get('peers') or []
@@ -1101,9 +1180,12 @@ class ArthaNode:
         height = self.blockchain.get_current_block_height()
         with self.lock:
             connected = len(self.peers)
+            # Recalculate best_known_height from current peer data
+            highest_peer = max(self.peer_heights.values(), default=0) if self.peer_heights else 0
+            best = max(self.best_known_height, highest_peer, height)
         return {
             'height': height,
             'peers': connected,
-            'best_known_height': max(self.best_known_height, height),
-            'in_sync': height >= self.best_known_height,
+            'best_known_height': best,
+            'in_sync': height >= best,
         }
