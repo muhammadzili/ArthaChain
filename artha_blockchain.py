@@ -19,7 +19,7 @@ class ArthaBlockchain:
     TARGET_BLOCK_TIME_SECONDS = 60
     DIFFICULTY_ADJUSTMENT_INTERVAL = 10
 
-    def __init__(self, blockchain_file='blockchain.json'):
+    def __init__(self, blockchain_file='blockchain.json', max_reorg_depth=100):
         self.blockchain_file = blockchain_file
         self.chain = []
         self.pending_transactions = []
@@ -31,6 +31,7 @@ class ArthaBlockchain:
         # that balance lookups and incremental validation do not rescan every
         # block. total_work is what decides which competing branch wins.
         self._state_cache = None
+        self.max_reorg_depth = max_reorg_depth
         self._load_or_create_chain()
 
     def _invalidate_cache(self):
@@ -174,9 +175,14 @@ class ArthaBlockchain:
     def add_transaction(self, sender, recipient, amount, signature, public_key_str, timestamp=None):
         try:
             amount_decimal = Decimal(amount)
-        except: return None
+        except:
+            return None
         
-        if self.get_balance(sender) < amount_decimal: return None
+        if amount_decimal < Decimal('0'):
+            return None
+        
+        if self.get_balance(sender) < amount_decimal:
+            return None
         
         canonical_amount_str = "{:.8f}".format(amount_decimal)
         tx_data = {'sender': sender, 'recipient': recipient, 'amount': canonical_amount_str}
@@ -221,6 +227,23 @@ class ArthaBlockchain:
 
     def get_current_block_height(self):
         return len(self.chain) - 1
+
+    def get_confirmations(self, block_height):
+        if block_height < 0:
+            return 0
+        return max(0, self.get_current_block_height() - block_height)
+
+    def is_transaction_finalized(self, tx_id, min_confirmations=6):
+        # Search in chain for tx_id; return True if found deep enough
+        with self.chain_lock:
+            cur = self.get_current_block_height()
+            for i, block in enumerate(reversed(self.chain)):
+                for tx in block.get('transactions', []):
+                    if tx.get('sender') == '0': continue
+                    if self._calculate_transaction_id(tx) == tx_id:
+                        height = block['index']
+                        return (cur - height + 1) >= min_confirmations
+            return False
 
     def get_balance_snapshot(self):
         with self.chain_lock:
@@ -297,6 +320,8 @@ class ArthaBlockchain:
 
             coinbase_count = 0
             coinbase_amount = Decimal('0')
+            # Prevent double-spend within same block
+            seen_tx_in_block = set()
             for tx in block.get('transactions', []):
                 amount = Decimal(tx['amount'])
                 if tx['sender'] == '0':
@@ -312,6 +337,11 @@ class ArthaBlockchain:
                 tx_data = {'sender': tx['sender'], 'recipient': tx['recipient'], 'amount': tx['amount']}
                 if not ArthaWallet.verify_signature(tx_data, tx['public_key_str'], tx['signature']):
                     return False, f'invalid transaction signature at block {i}', None
+
+                txid = self._calculate_transaction_id(tx)
+                if txid in seen_tx_in_block:
+                    return False, f'double spend in same block {i}', None
+                seen_tx_in_block.add(txid)
 
                 current_balances[tx['sender']] -= amount
                 current_balances[tx['recipient']] = current_balances.get(tx['recipient'], Decimal('0')) + amount
@@ -449,6 +479,14 @@ class ArthaBlockchain:
             if not new_chain:
                 return False
 
+            # Reorg depth protection
+            old_height = self.get_current_block_height()
+            new_height = len(new_chain) - 1
+            reorg_depth = old_height - new_height if new_height < old_height else 0
+            if reorg_depth > self.max_reorg_depth:
+                logger.warning(f'Rejecting deep reorg attempt: depth {reorg_depth} > max {self.max_reorg_depth}')
+                return False
+
             if not self._outranks_current(new_chain):
                 logger.debug(
                     f'Ignored non-winning chain from peer: '
@@ -468,7 +506,7 @@ class ArthaBlockchain:
             # Restore orphaned txs from old chain
             self._restore_orphaned_transactions(old_chain, self.chain)
             self.save_chain()
-            logger.info(f'Chain updated to block #{self.last_block["index"]}.')
+            logger.info(f'Chain reorg completed: new tip #{self.last_block["index"]} (old {old_height})')
             return True
 
     def get_chain(self):

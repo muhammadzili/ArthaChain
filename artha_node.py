@@ -23,6 +23,13 @@ MAX_BLOCKS_PER_RESPONSE = 500  # cap a catch-up response so one reply cannot flo
 REQUEST_MIN_INTERVAL = 1.0  # minimum gap between catch-up requests
 SYNC_ESCALATE_COOLDOWN = 20  # minimum gap between fork-resolution attempts
 PEERS_FILE = 'peers.json'
+MAX_PEERS = 50  # max total peers to connect to
+PEER_DISCOVERY_INTERVAL = 30  # share peers periodically
+MIN_PEER_SHARE_INTERVAL = 10  # throttle peer sharing
+DISCOVERY_START_DELAY = 5  # first gossip goes out soon after start, not 30s in
+MAX_SHARED_PEERS = 20  # cap one gossip message
+SOCKET_RECV_TIMEOUT = 30  # recv timeout so a dead TCP link frees its reader thread
+CONNECT_TIMEOUT = 10  # outbound connect timeout
 
 # Addresses that mean "this machine", used to reject self-connections.
 _LOCAL_HOSTS = {'127.0.0.1', 'localhost', '0.0.0.0', '::1', ''}
@@ -42,8 +49,14 @@ class ArthaNode:
         self.message_queue = Queue()
         self.last_peer_update = 0
         self.bootstrap_peers = []
+        # What each peer told us to dial it on, keyed by our connection key. An
+        # inbound socket arrives from an ephemeral port, which nobody can dial.
+        self._peer_advertised = {}
+        # The address other nodes should use for us. Resolved once, it never moves.
+        self.advertised_address = self._resolve_advertised_address()
         # Peers added by the user at runtime; persisted so they survive restarts.
         self.manual_peers = []
+        self.discovered_peers = []
         # Cache of block hashes we already hold, to ignore blocks we already have.
         self._known_block_hashes = set()
         # Highest height any peer has told us about, used to notice we fell behind.
@@ -51,6 +64,7 @@ class ArthaNode:
         self._sync_lock = threading.Lock()
         self._last_block_request = 0.0
         self._last_escalation = 0.0
+        self._last_peer_share = 0.0
 
         self._index_known_blocks()
 
@@ -62,6 +76,7 @@ class ArthaNode:
         threading.Thread(target=self._message_processing_loop, daemon=True).start()
         threading.Thread(target=self._peer_update_loop, daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+        threading.Thread(target=self._peer_discovery_loop, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Peer list management
@@ -69,13 +84,22 @@ class ArthaNode:
 
     def _load_manual_peers(self):
         saved = load_json_file(PEERS_FILE) or {}
-        peers = saved.get('peers', []) if isinstance(saved, dict) else []
+        peers = saved.get('peers', []) if isinstance(saved, dict) else saved if isinstance(saved, list) else []
+        discovered = saved.get('discovered_peers', []) if isinstance(saved, dict) else []
         with self.lock:
-            self.manual_peers = list(peers)
+            if isinstance(saved, dict):
+                self.manual_peers = list(peers)
+                self.discovered_peers = list(discovered)
+            else:
+                self.manual_peers = list(peers) if peers else []
+                self.discovered_peers = []
 
     def _save_manual_peers(self):
         with self.lock:
-            save_json_file(PEERS_FILE, {'peers': list(self.manual_peers)})
+            save_json_file(PEERS_FILE, {
+                'peers': list(self.manual_peers),
+                'discovered_peers': list(self.discovered_peers)
+            })
 
     def add_peer(self, peer):
         """
@@ -124,6 +148,7 @@ class ArthaNode:
                 'connected': list(self.peers.keys()),
                 'manual': list(self.manual_peers),
                 'bootstrap': list(self.bootstrap_peers),
+                'discovered': list(self.discovered_peers),
             }
 
     @staticmethod
@@ -148,13 +173,95 @@ class ArthaNode:
             return False
         return host.lower() in _LOCAL_HOSTS or host == self.host
 
+    def _normalize_peer(self, peer):
+        parsed = self._parse_peer(peer)
+        if parsed is None:
+            return None
+        host, port = parsed
+        if self._is_self(host, port):
+            return None
+        return f'{host}:{port}'
+
+    def _add_discovered_peer(self, peer):
+        addr = self._normalize_peer(peer)
+        if addr is None:
+            return
+        with self.lock:
+            known = (
+                self.manual_peers + self.discovered_peers + self.bootstrap_peers
+                + list(self.peers.keys())
+            )
+            if addr in known:
+                return
+            # An inbound link is keyed by an ephemeral port, so the same node
+            # reached through its advertised address looks new. Match on the
+            # address the peer gave us to avoid dialling a peer we hold.
+            if addr in self._peer_advertised.values():
+                return
+            if len(self.discovered_peers) >= MAX_PEERS:
+                self.discovered_peers.pop(0)
+            self.discovered_peers.append(addr)
+            at_capacity = len(self.peers) >= MAX_PEERS
+        self._save_manual_peers()
+        # Try connect immediately, but not when already saturated: a single
+        # gossip reply can name 20 peers, and dialing all of them blind turns
+        # discovery into a connect storm.
+        if not at_capacity:
+            parsed = self._parse_peer(addr)
+            if parsed:
+                self.connect_to_peer(parsed[0], parsed[1])
+
+    def _collect_shareable_peers(self):
+        """
+        Dialable addresses worth passing on.
+
+        Connected peers contribute the address they advertised over HELLO. Without
+        that we would gossip the ephemeral port their socket arrived on, and every
+        node we told would try to dial a closed port.
+        """
+        peers = set()
+        with self.lock:
+            advertised = dict(self._peer_advertised)
+            for connection_key in self.peers.keys():
+                candidate = advertised.get(connection_key) or connection_key
+                normalized = self._normalize_peer(candidate)
+                if normalized:
+                    peers.add(normalized)
+            for group in (self.manual_peers, self.bootstrap_peers, self.discovered_peers):
+                for peer in group:
+                    normalized = self._normalize_peer(peer)
+                    if normalized:
+                        peers.add(normalized)
+        return sorted(peers)[:MAX_SHARED_PEERS]
+
+    def _share_peers(self, target_peer):
+        """
+        Offer our peer list to one peer.
+
+        Throttled globally: unsolicited gossip is fire-and-forget, so without
+        this every heartbeat on every link turns into a peer-list broadcast.
+        """
+        now = time.time()
+        with self.lock:
+            if now - self._last_peer_share < MIN_PEER_SHARE_INTERVAL:
+                return False
+            self._last_peer_share = now
+        try:
+            self.send_message(
+                target_peer, 'PEERS', {'peers': self._collect_shareable_peers()}
+            )
+            return True
+        except Exception as e:
+            logger.debug(f'Could not share peers with {target_peer}: {e}')
+            return False
+
     def _all_candidate_peers(self):
         """Peers worth connecting to, manual ones first, without duplicates."""
         candidates = []
         with self.lock:
-            ordered = list(self.manual_peers) + list(self.bootstrap_peers)
+            ordered = list(self.manual_peers) + list(self.discovered_peers) + list(self.bootstrap_peers)
         for peer in ordered:
-            if peer not in candidates:
+            if peer not in candidates and len(candidates) < MAX_PEERS:
                 candidates.append(peer)
         return candidates
 
@@ -180,11 +287,31 @@ class ArthaNode:
             return False
 
     def _peer_update_loop(self):
-        """Periodically update the peer list from Gist"""
+        """
+        Keep the bootstrap list fresh.
+
+        Fetches before the first sleep, not after: sleeping first left the node
+        with an empty bootstrap list for a whole hour, so a fresh node could not
+        discover anybody until a peer had been typed in by hand.
+        """
         while self.is_running:
+            self._fetch_peer_list()
             time.sleep(PEER_UPDATE_INTERVAL)
-            if self.is_running:
-                self._fetch_peer_list()
+
+    def _peer_discovery_loop(self):
+        """Walk our links and offer our peer list onward."""
+        delay = DISCOVERY_START_DELAY
+        while self.is_running:
+            time.sleep(delay)
+            delay = PEER_DISCOVERY_INTERVAL
+            if not self.is_running:
+                break
+            with self.lock:
+                peers = list(self.peers.keys())
+            for peer in peers:
+                # _share_peers keeps its own global interval, so this settles
+                # into roughly one gossip message per PEER_DISCOVERY_INTERVAL.
+                self._share_peers(peer)
 
     # ------------------------------------------------------------------
     # Heartbeat & maintenance
@@ -204,6 +331,9 @@ class ArthaNode:
                 peers = list(self.peers.keys())
             for peer in peers:
                 self.send_message(peer, 'PING', self._chain_summary())
+                # _share_peers is globally throttled, so this stays quiet on
+                # most ticks and only fires when the interval has elapsed.
+                self._share_peers(peer)
 
     def _peer_maintenance_loop(self):
         """Handle peer health checks and reconnections"""
@@ -233,6 +363,7 @@ class ArthaNode:
     def _drop_peer(self, peer_address):
         """Close and forget a peer. Caller must hold self.lock."""
         peer_data = self.peers.pop(peer_address, None)
+        self._peer_advertised.pop(peer_address, None)
         if peer_data:
             try:
                 peer_data['socket'].close()
@@ -319,48 +450,72 @@ class ArthaNode:
             }
 
         logger.debug(f"Connection established with {peer_address}")
-        # Greet inbound peers immediately so both sides learn each other's height
-        # and whoever is behind can start pulling blocks.
-        threading.Thread(
-            target=self._sync_with_peer,
-            args=(peer_address,),
-            daemon=True
-        ).start()
-        buffer = b''
+        # Both sides announce the address they can be dialled on, so neither has
+        # to guess the other's port from the ephemeral one the socket arrived on.
+        self._send_hello(peer_address)
+        self._reader_loop(conn, peer_address)
 
+    def _reader_loop(self, conn, peer_address):
+        """
+        Read newline-delimited JSON messages off one link until it closes.
+
+        Every link owns one of these threads, so the socket carries a recv
+        timeout: without it a peer that vanishes without a FIN pins a thread and
+        keeps a dead entry alive until PEER_TIMEOUT fires.
+        """
+        buffer = b''
+        conn.settimeout(SOCKET_RECV_TIMEOUT)
         try:
             while self.is_running:
-                data = conn.recv(65536)
-                if not data:
+                try:
+                    data = conn.recv(65536)
+                except socket.timeout:
+                    # Silence is fine: the heartbeat loop and PEER_TIMEOUT judge
+                    # liveness, not this thread.
+                    continue
+                except OSError as e:
+                    logger.debug(f"Read error on {peer_address}: {e}")
                     break
 
-                buffer += data
+                if not data:
+                    break  # peer closed its end
 
+                buffer += data
+                # One TCP read can carry several messages, or half of one.
                 while b'\n' in buffer:
                     line, buffer = buffer.split(b'\n', 1)
-                    if line:
-                        try:
-                            message = json.loads(line.decode('utf-8'))
-                        except json.JSONDecodeError:
-                            logger.debug(f"Invalid JSON from {peer_address}")
-                            continue
-                        with self.lock:
-                            if peer_address in self.peers:
-                                self.peers[peer_address]['last_seen'] = time.time()
-                        self.message_queue.put((message, peer_address))
-        except ConnectionResetError:
-            logger.info(f"Connection reset by {peer_address}")
-        except Exception as e:
-            logger.error(f"Error handling client {peer_address}: {e}")
+                    if not line.strip():
+                        continue
+                    try:
+                        message = json.loads(line.decode('utf-8'))
+                    except (UnicodeDecodeError, ValueError):
+                        logger.debug(f'Discarded malformed frame from {peer_address}.')
+                        continue
+                    with self.lock:
+                        current = self.peers.get(peer_address)
+                        # Only refresh the entry that still owns this socket.
+                        if current is not None and current['socket'] is conn:
+                            current['last_seen'] = time.time()
+                    self.message_queue.put((message, peer_address))
         finally:
-            with self.lock:
-                if self.peers.get(peer_address, {}).get('socket') is conn:
-                    self._drop_peer(peer_address)
-            try:
-                conn.close()
-            except OSError:
-                pass
-            logger.info(f"Connection to {peer_address} closed.")
+            self._retire_connection(peer_address, conn)
+
+    def _retire_connection(self, peer_address, conn):
+        """
+        Drop a link and close its socket.
+
+        The identity check matters: if this socket was already replaced by a
+        reconnect, the live link must survive.
+        """
+        with self.lock:
+            current = self.peers.get(peer_address)
+            if current is not None and current['socket'] is conn:
+                self._drop_peer(peer_address)
+        try:
+            conn.close()
+        except OSError:
+            pass
+        logger.debug(f'Connection to {peer_address} closed.')
 
     # ------------------------------------------------------------------
     # Message processing
@@ -374,6 +529,10 @@ class ArthaNode:
 
         try:
             if msg_type == 'PING':
+                # A PING carries the same height/tip as a PONG. Reading it too
+                # means a node that only ever dials out still learns where the
+                # network is, instead of reporting itself in sync at height 0.
+                self._handle_pong(message.get('data', {}), sender_peer_address)
                 self.send_message(sender_peer_address, 'PONG', self._chain_summary())
 
             elif msg_type == 'PONG':
@@ -400,8 +559,75 @@ class ArthaNode:
             elif msg_type == 'RESPOND_CHAIN':
                 self._handle_chain_response(message['data'])
 
+            elif msg_type == 'GET_PEERS':
+                self.send_message(sender_peer_address, 'PEERS', {'peers': self._collect_shareable_peers()})
+
+            elif msg_type == 'PEERS':
+                self._handle_peers_message(message.get('data', {}))
+
+            elif msg_type == 'HELLO':
+                self._handle_hello(message.get('data', {}), sender_peer_address)
+
         except Exception as e:
             logger.error(f"Error processing {msg_type} message: {e}")
+
+    def _resolve_advertised_address(self):
+        """
+        The address other nodes should dial us on.
+
+        The listener is usually bound to 0.0.0.0, which is not routable, so ask
+        the OS which local interface it would use to reach the internet. A
+        connected UDP socket sends no packets.
+        """
+        host = self.host
+        if host.lower() in _LOCAL_HOSTS:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                probe.connect(('8.8.8.8', 53))
+                host = probe.getsockname()[0]
+            except OSError:
+                host = '127.0.0.1'
+            finally:
+                probe.close()
+        return f'{host}:{self.port}'
+
+    def _send_hello(self, peer_address):
+        """Tell a peer the address it can reach us on."""
+        try:
+            self.send_message(peer_address, 'HELLO', {
+                'address': self.advertised_address,
+                'height': self.blockchain.get_current_block_height(),
+            })
+        except Exception as e:
+            logger.debug(f'Could not send HELLO to {peer_address}: {e}')
+
+    def _handle_hello(self, data, sender_peer_address):
+        """
+        Record the address a peer asked to be dialled on.
+
+        Kept beside the connection rather than used as its key: the reader
+        thread looks itself up by that key, so re-keying mid-flight would strand
+        the link.
+        """
+        advertised = self._normalize_peer(data.get('address'))
+        if not advertised or advertised == sender_peer_address:
+            return
+        with self.lock:
+            if sender_peer_address not in self.peers:
+                return
+            # Is any live link already pointing at this same node? Our own
+            # manual entry may say 127.0.0.1:5001 while the link we hold is
+            # keyed that way but advertises the routable address, so both the
+            # keys and the advertised values have to be checked. When a
+            # duplicate turns up the older link wins: it is the one already
+            # proven alive, and dropping the new socket makes its reader thread
+            # stop on its own.
+            if advertised in self.peers or advertised in self._peer_advertised.values():
+                logger.debug(f'Dropping duplicate link {sender_peer_address} -> {advertised}.')
+                self._drop_peer(sender_peer_address)
+                return
+            self._peer_advertised[sender_peer_address] = advertised
+        logger.debug(f'Peer {sender_peer_address} is reachable at {advertised}.')
 
     def _chain_summary(self):
         """Height plus tip hash, so peers can spot lag and forks from a heartbeat."""
@@ -565,7 +791,14 @@ class ArthaNode:
                 self.send_message(peer, message_type, data)
 
     def connect_to_peer(self, host, port):
-        """Connect to a peer node"""
+        """
+        Open an outbound link to a peer.
+
+        The socket is always cleaned up on failure. Registering the peer before
+        the reader thread starts means a later failure has to undo that too,
+        otherwise we leak a socket and leave a phantom entry that the
+        maintenance loop waits PEER_TIMEOUT to notice.
+        """
         if self._is_self(host, port):
             logger.debug(f'Skipping self-connection to {host}:{port}')
             return False
@@ -574,29 +807,48 @@ class ArthaNode:
         with self.lock:
             if peer_address in self.peers:
                 return True
+            # Already linked to this node under a different key: our own manual
+            # or bootstrap entry says 127.0.0.1:5001 while the link we hold is
+            # keyed by that node's real address. Dialling again would pile up a
+            # duplicate connection every reconnect cycle.
+            if peer_address in self._peer_advertised.values():
+                logger.debug(f'Already linked to {peer_address} under another key.')
+                return True
 
+        sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10)
+            sock.settimeout(CONNECT_TIMEOUT)
             sock.connect((host, port))
-            sock.settimeout(None)
+            sock.settimeout(SOCKET_RECV_TIMEOUT)
 
+            with self.lock:
+                if peer_address in self.peers:
+                    sock.close()
+                    return True
+                self.peers[peer_address] = {
+                    'socket': sock,
+                    'last_seen': time.time()
+                }
+
+            logger.debug(f"Connected to peer: {peer_address}")
             threading.Thread(
-                target=self._handle_client,
+                target=self._reader_loop,
                 args=(sock, peer_address),
                 daemon=True
             ).start()
-            logger.debug(f"Connected to peer: {peer_address}")
-            # A fresh link is the moment to reconcile: ask right away instead of
-            # waiting for the next block to be broadcast.
             threading.Thread(
                 target=self._sync_with_peer,
                 args=(peer_address,),
                 daemon=True
             ).start()
+            self._send_hello(peer_address)
+            self.send_message(peer_address, 'GET_PEERS', {})
             return True
         except Exception as e:
-            logger.debug(f"Failed to connect to {peer_address}: {e}")
+            logger.warning(f"Failed to connect to {peer_address}: {e}")
+            if sock is not None:
+                self._retire_connection(peer_address, sock)
             return False
 
     def _sync_with_peer(self, peer_address, delay=1.5):
@@ -610,21 +862,44 @@ class ArthaNode:
         height = self.blockchain.get_current_block_height()
         self.send_message(peer_address, 'PING', self._chain_summary())
         self.send_message(peer_address, 'GET_BLOCKS', {'from_index': height + 1})
+        try:
+            self.send_message(peer_address, 'GET_PEERS', {})
+        except Exception:
+            pass
 
     def connect_to_bootstraps(self):
-        """Try every known peer once. Never recurses."""
-        connected = 0
+        """
+        Try every known peer once. Never recurses.
+
+        Dials run in parallel: each has to wait out CONNECT_TIMEOUT, so trying
+        them in series means a handful of dead addresses can block the live ones
+        for minutes.
+        """
+        candidates = []
         for peer in self._all_candidate_peers():
-            if not self.is_running:
-                break
             parsed = self._parse_peer(peer)
             if parsed is None:
                 logger.warning(f"Invalid peer format, skipping: {peer}")
                 continue
-            host, port = parsed
-            if self.connect_to_peer(host, port):
-                connected += 1
+            if parsed not in candidates:
+                candidates.append(parsed)
 
+        results = {}
+
+        def dial(parsed):
+            host, port = parsed
+            results[parsed] = self.connect_to_peer(host, port)
+
+        workers = []
+        for parsed in candidates:
+            worker = threading.Thread(target=dial, args=(parsed,), daemon=True)
+            worker.start()
+            workers.append(worker)
+        for worker in workers:
+            worker.join(timeout=CONNECT_TIMEOUT + 5)
+
+        connected = sum(1 for value in results.values() if value)
+        self._prune_dead_discovered(results)
         if connected:
             # Let the handshake settle, then ask peers where they're at.
             threading.Thread(target=self._initial_sync, daemon=True).start()
@@ -632,9 +907,36 @@ class ArthaNode:
             logger.warning("Could not connect to any known peers.")
         return connected
 
+    def _prune_dead_discovered(self, results):
+        """
+        Forget discovered peers we just failed to reach.
+
+        Learned addresses pile up and are never cleared, so a node that has been
+        up for a while fills its peer list with dead entries. They then cost a
+        dial on every reconnect and take up the gossip slots that live peers
+        should be using. Manual and bootstrap entries are left alone: those were
+        put there by the user or by the published list.
+        """
+        dead = [
+            f'{host}:{port}' for (host, port), ok in results.items()
+            if not ok and self._normalize_peer(f'{host}:{port}')
+        ]
+        if not dead:
+            return
+        with self.lock:
+            before = len(self.discovered_peers)
+            self.discovered_peers = [p for p in self.discovered_peers if p not in dead]
+            changed = len(self.discovered_peers) != before
+        if changed:
+            self._save_manual_peers()
+            logger.debug(f'Dropped {len(dead)} unreachable discovered peer(s).')
+
     def connect_and_sync_initial(self):
         """Connect to peers and request the chain. Runs on its own thread."""
         time.sleep(2)  # Give the server socket time to bind
+        # Make sure the bootstrap list exists before the first dial attempt,
+        # otherwise a slow network leaves us with nothing to try.
+        self._fetch_peer_list()
         self.connect_to_bootstraps()
 
     def _initial_sync(self):
@@ -698,6 +1000,11 @@ class ArthaNode:
             peers = list(self.peers.keys())
         for peer in peers:
             self.send_message(peer, 'REQUEST_CHAIN', {})
+
+    def _handle_peers_message(self, data):
+        peers = data.get('peers') or []
+        for p in peers:
+            self._add_discovered_peer(p)
 
     # ------------------------------------------------------------------
     # Chain logic

@@ -66,7 +66,8 @@ def show_connected_peers(node):
     """Print the peers this node currently has an open connection to."""
     peers = node.get_peer_list()
     if not peers['connected']:
-        print("\nTidak ada peer yang terhubung.")
+        print("\nTidak ada peer yang terhubung (masih mencoba konek / remote offline).")
+        print("Cek menu 'Daftar Peer Tersimpan' (6) untuk melihat peer yang disimpan.")
         print("Gunakan menu 'Tambah Peer Baru' atau tunggu sinkronisasi otomatis.")
         return
     print("\nPeer yang Terhubung:")
@@ -85,6 +86,7 @@ def add_new_peer(node):
     ok, message = node.add_peer(peer)
     if ok:
         print(message)
+        print("Periksa 'Peer Terhubung' (menu 3) dalam beberapa detik...")
         # Ask right away so a fresh peer catches up immediately.
         sync_after_delay(node)
     else:
