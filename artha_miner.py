@@ -12,7 +12,7 @@ from artha_node import ArthaNode
 import artha_protocol as P
 
 MINER_HOST = '0.0.0.0'
-MINER_PORT = 5001
+MINER_PORT = P.DEFAULT_MINER_PORT
 
 def setup_logging(port):
     log_dir = os.path.join(os.path.expanduser("~"), ".artha_chain", "logs")
