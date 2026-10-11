@@ -79,7 +79,7 @@ class ArthaCore(ThemedTk):
         try:
             self.wallet = ArthaWallet(password=self.password)
             self.blockchain = ArthaBlockchain()
-            app_port = int(sys.argv[1]) if len(sys.argv) > 1 else 5002
+            app_port = int(sys.argv[1]) if len(sys.argv) > 1 else P.DEFAULT_GUI_PORT
             self.node = ArthaNode('0.0.0.0', app_port, self.blockchain, new_tx_event=None)
             threading.Thread(target=self.node.start, daemon=True).start()
             
@@ -353,7 +353,7 @@ class SendDialog(simpledialog.Dialog):
 
 if __name__ == "__main__":
     try:
-        port = int(sys.argv[1]) if len(sys.argv) > 1 else 5002
+        port = int(sys.argv[1]) if len(sys.argv) > 1 else P.DEFAULT_GUI_PORT
         setup_gui_logging(port)
         app = ArthaCore()
         app.mainloop()

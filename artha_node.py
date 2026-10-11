@@ -15,7 +15,7 @@ import artha_protocol as P
 logger = logging.getLogger(__name__)
 
 # Configuration
-GIST_URL = "https://gist.githubusercontent.com/muhammadzili/19fbb07822977ada20ef98cd3e5638c4/raw/c2e47995f7867427bf46a1bb1a3494ebea27a450/node.json"
+GIST_URL = P.GIST_URL  # None untuk devnet/localnet (tanpa discovery publik)
 PEER_UPDATE_INTERVAL = 3600  # 1 hour in seconds
 HEARTBEAT_INTERVAL = 20  # send a PING this often to keep links alive
 PEER_TIMEOUT = 75  # drop a peer after 3 missed heartbeats
@@ -55,7 +55,7 @@ class ArthaNode:
         self.new_tx_event = new_tx_event
         self.message_queue = Queue()
         self.last_peer_update = 0
-        self.bootstrap_peers = []
+        self.bootstrap_peers = list(P.BOOTSTRAP_PEERS)
         # What each peer told us to dial it on, keyed by our connection key. An
         # inbound socket arrives from an ephemeral port, which nobody can dial.
         self._peer_advertised = {}
@@ -304,7 +304,17 @@ class ArthaNode:
         return candidates
 
     def _fetch_peer_list(self):
-        """Fetch the latest peer list from GitHub Gist"""
+        """
+        Ambil daftar peer bootstrap.
+
+        mainnet menarik daftar dari Gist; devnet/localnet tidak (isolasi), cukup
+        pakai peer lokal dari profil jaringan.
+        """
+        if not P.DISCOVERY_ENABLED or not GIST_URL:
+            with self.lock:
+                if not self.bootstrap_peers:
+                    self.bootstrap_peers = list(P.BOOTSTRAP_PEERS)
+            return True
         try:
             with urllib.request.urlopen(GIST_URL, timeout=5) as response:
                 data = json.loads(response.read().decode('utf-8'))
@@ -321,7 +331,7 @@ class ArthaNode:
             logger.warning(f"Failed to fetch peer list: {e}")
             with self.lock:
                 if not self.bootstrap_peers:
-                    self.bootstrap_peers = ['127.0.0.1:5001']
+                    self.bootstrap_peers = list(P.BOOTSTRAP_PEERS) or [f'127.0.0.1:{P.DEFAULT_MINER_PORT}']
             return False
 
     def _peer_update_loop(self):

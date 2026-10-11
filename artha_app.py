@@ -13,7 +13,7 @@ from artha_node import ArthaNode
 import artha_protocol as P
 
 APP_HOST = '0.0.0.0'
-APP_PORT = 5000
+APP_PORT = P.DEFAULT_APP_PORT
 
 def setup_logging(port):
     """Sets up logging to console and a file with a unique name."""

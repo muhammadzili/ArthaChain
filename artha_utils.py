@@ -6,6 +6,8 @@ import os
 import logging
 from decimal import Decimal
 
+import artha_protocol as P
+
 logger = logging.getLogger(__name__)
 
 # --- PERBAIKAN: Menambahkan custom JSON encoder untuk tipe Decimal ---
@@ -45,9 +47,20 @@ def json_serialize(data):
 def get_data_dir():
     """
     Returns the data directory path for ArthaChain.
+
+    Prioritas:
+      1. ARTHA_DATADIR  -> override penuh (untuk menjalankan banyak instance
+         di satu PC tanpa bentrok file chain).
+      2. ~/.artha_chain/<subdir jaringan>  (mainnet = tanpa subdir).
     """
-    home_dir = os.path.expanduser("~")
-    artha_dir = os.path.join(home_dir, ".artha_chain")
+    override = os.environ.get('ARTHA_DATADIR')
+    if override:
+        artha_dir = os.path.expanduser(override)
+    else:
+        artha_dir = os.path.join(os.path.expanduser("~"), ".artha_chain")
+        sub = getattr(P, 'DATA_SUBDIR', '')
+        if sub:
+            artha_dir = os.path.join(artha_dir, sub)
     os.makedirs(artha_dir, exist_ok=True)
     return artha_dir
 
