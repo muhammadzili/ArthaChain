@@ -10,6 +10,7 @@ from queue import Queue
 import urllib.request
 
 from artha_utils import load_json_file, save_json_file
+import artha_protocol as P
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,12 @@ DISCOVERY_START_DELAY = 5  # first gossip goes out soon after start, not 30s in
 MAX_SHARED_PEERS = 20  # cap one gossip message
 SOCKET_RECV_TIMEOUT = 30  # recv timeout so a dead TCP link frees its reader thread
 CONNECT_TIMEOUT = 10  # outbound connect timeout
+
+# Hard caps so one peer cannot exhaust memory or swamp the message loop.
+MAX_MESSAGE_BYTES = P.MAX_MESSAGE_BYTES  # single line of JSON
+MAX_BUFFER_BYTES = P.MAX_BUFFER_BYTES  # unparsed bytes held per link
+MAX_TX_RELAY_BYTES = P.MAX_TX_RELAY_BYTES  # NEW_TRANSACTION payload
+MAX_CHAIN_RESPONSE_BYTES = P.MAX_CHAIN_RESPONSE_BYTES  # full RESPOND_CHAIN payload
 
 # Addresses that mean "this machine", used to reject self-connections.
 _LOCAL_HOSTS = {'127.0.0.1', 'localhost', '0.0.0.0', '::1', ''}
@@ -516,10 +523,18 @@ class ArthaNode:
                     break  # peer closed its end
 
                 buffer += data
+                if len(buffer) > MAX_BUFFER_BYTES:
+                    # No newline within the limit: this peer is either broken or
+                    # hostile. Drop the link instead of buffering without bound.
+                    logger.warning(f'Peer {peer_address} exceeded max message buffer; closing link.')
+                    break
                 # One TCP read can carry several messages, or half of one.
                 while b'\n' in buffer:
                     line, buffer = buffer.split(b'\n', 1)
                     if not line.strip():
+                        continue
+                    if len(line) > MAX_MESSAGE_BYTES:
+                        logger.debug(f'Discarded oversized frame from {peer_address}.')
                         continue
                     try:
                         message = json.loads(line.decode('utf-8'))
@@ -586,10 +601,7 @@ class ArthaNode:
                 self._handle_blocks_response(message['data'], sender_peer_address)
 
             elif msg_type == 'REQUEST_CHAIN':
-                self.send_message(sender_peer_address, 'RESPOND_CHAIN', {
-                    'height': self.blockchain.get_current_block_height(),
-                    'chain': self.blockchain.chain,
-                })
+                self._serve_chain_request(sender_peer_address)
 
             elif msg_type == 'RESPOND_CHAIN':
                 self._handle_chain_response(message['data'], sender_peer_address)
@@ -627,11 +639,13 @@ class ArthaNode:
         return f'{host}:{self.port}'
 
     def _send_hello(self, peer_address):
-        """Tell a peer the address it can reach us on."""
+        """Tell a peer the address it can reach us on, plus our network identity."""
         try:
             self.send_message(peer_address, 'HELLO', {
                 'address': self.advertised_address,
                 'height': self.blockchain.get_current_block_height(),
+                'chain_id': P.CHAIN_ID,
+                'protocol_version': P.PROTOCOL_VERSION,
             })
         except Exception as e:
             logger.debug(f'Could not send HELLO to {peer_address}: {e}')
@@ -644,6 +658,15 @@ class ArthaNode:
         thread looks itself up by that key, so re-keying mid-flight would strand
         the link.
         """
+        # Refuse a peer on a different network. Missing chain_id means an old
+        # node: allow it for now (it can only speak the v1 grammar) but no
+        # longer trust anything it says that assumes a shared ledger id.
+        peer_chain = data.get('chain_id')
+        if peer_chain is not None and peer_chain != P.CHAIN_ID:
+            logger.warning(f'Peer {sender_peer_address} is on chain "{peer_chain}", not "{P.CHAIN_ID}". Dropping.')
+            self._drop_peer(sender_peer_address)
+            return
+
         peer_h = data.get('height')
         if isinstance(peer_h, int):
             self._update_peer_height(sender_peer_address, peer_h)
@@ -699,12 +722,26 @@ class ArthaNode:
                 self._escalate_sync(sender_peer_address)
 
     def _handle_new_transaction(self, tx_data, sender_peer_address):
-        tx = tx_data['transaction']
-        pk = tx_data['public_key_str']
-        if self.blockchain.add_transaction(
-            tx['sender'], tx['recipient'], Decimal(tx['amount']),
-            tx['signature'], pk, tx.get('timestamp')
-        ):
+        """
+        Validate a relayed transaction and, if accepted, pass it on.
+
+        The whole transaction is handed to submit_transaction so v2 fields
+        (version/chain_id/fee/nonce/sig_algo) survive the trip; re-signing it
+        from loose fields would silently drop the replay protection.
+        """
+        if not isinstance(tx_data, dict):
+            return
+        if len(json.dumps(tx_data)) > MAX_TX_RELAY_BYTES:
+            logger.debug(f'Discarded oversized NEW_TRANSACTION from {sender_peer_address}.')
+            return
+        tx = tx_data.get('transaction')
+        if not isinstance(tx, dict):
+            return
+        # v2 transactions carry sig_algo/fee/nonce directly; v1 fall back to the
+        # top-level public key.
+        if 'public_key_str' not in tx:
+            tx['public_key_str'] = tx_data.get('public_key_str')
+        if self.blockchain.submit_transaction(tx):
             if self.new_tx_event:
                 self.new_tx_event.set()
             self.broadcast_message('NEW_TRANSACTION', tx_data, exclude_peer=sender_peer_address)
@@ -736,6 +773,9 @@ class ArthaNode:
             return
 
         blocks = chain_copy[start:start + MAX_BLOCKS_PER_RESPONSE]
+        # Trim by serialized size too: 500 fat blocks can still be a huge frame.
+        while blocks and len(json.dumps(blocks)) > MAX_CHAIN_RESPONSE_BYTES:
+            blocks = blocks[:max(1, len(blocks) // 2)]
         self.send_message(sender_peer_address, 'BLOCKS', {
             'from_index': start,
             'blocks': blocks,
@@ -743,6 +783,25 @@ class ArthaNode:
             # Echo the requester so it can skip re-broadcasting back to us.
             'to': sender_peer_address,
         })
+
+    def _serve_chain_request(self, sender_peer_address):
+        """
+        Answer REQUEST_CHAIN, but never build a payload large enough to OOM.
+
+        An unbounded full-chain reply is itself a DoS: any peer can ask for it
+        repeatedly. If the chain will not fit in one safe frame, answer with a
+        bounded block slice instead so the requester still makes progress.
+        """
+        with self.blockchain.chain_lock:
+            chain_copy = list(self.blockchain.chain)
+        height = len(chain_copy) - 1
+        payload = {'height': height, 'chain': chain_copy}
+        if len(json.dumps(payload)) > MAX_CHAIN_RESPONSE_BYTES:
+            start = max(0, len(chain_copy) - MAX_BLOCKS_PER_RESPONSE)
+            logger.debug('Chain too large for one RESPOND_CHAIN; serving latest blocks.')
+            self._serve_blocks_request({'from_index': start}, sender_peer_address)
+            return
+        self.send_message(sender_peer_address, 'RESPOND_CHAIN', payload)
 
     def _handle_blocks_response(self, data, sender_peer_address=None):
         """

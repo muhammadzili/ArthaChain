@@ -15,11 +15,26 @@ class DecimalEncoder(json.JSONEncoder):
             return str(obj)
         return super(DecimalEncoder, self).default(obj)
 
-def hash_data(data):
+# Registry algoritma hash. Menambah entri di sini (plus aktivasi height di
+# artha_protocol.py) adalah cara mengganti hash tanpa bongkar arsitektur.
+_HASHERS = {
+    'sha256': hashlib.sha256,
+    'sha3_256': hashlib.sha3_256,
+}
+
+
+def hash_data(data, algo='sha256'):
     """
-    Generates a SHA256 hash of the given data.
+    Hash `data` (bytes atau str) dengan algoritma yang dipilih.
+
+    Default sha256 agar seluruh chain lama dan pemanggil lama tetap kompatibel.
     """
-    return hashlib.sha256(data).hexdigest()
+    if isinstance(data, str):
+        data = data.encode('utf-8')
+    hasher = _HASHERS.get(algo)
+    if hasher is None:
+        raise ValueError(f"Algoritma hash tidak dikenal: {algo}")
+    return hasher(data).hexdigest()
 
 def json_serialize(data):
     """

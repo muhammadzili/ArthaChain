@@ -2,24 +2,38 @@
 
 import time
 import hashlib
+import shutil
+import os
 import threading
 from decimal import Decimal, getcontext
-from artha_utils import hash_data, json_serialize, load_json_file, save_json_file
+from artha_utils import hash_data, json_serialize, load_json_file, save_json_file, get_data_dir
 from artha_wallet import ArthaWallet
+import artha_protocol as P
 import logging
 
 getcontext().prec = 28
 logger = logging.getLogger(__name__)
 
-class ArthaBlockchain:
-    # Constants for ARTH blockchain parameters
-    TOTAL_SUPPLY = Decimal('21000000')  # Total ARTH supply cap
-    BLOCK_REWARD_BASE = Decimal('50')  # Initial block reward
-    HALVING_INTERVAL = 210000  # Number of blocks before reward halves
-    TARGET_BLOCK_TIME_SECONDS = 60
-    DIFFICULTY_ADJUSTMENT_INTERVAL = 10
+# Batas atas nilai Decimal yang valid tanpa memicu InvalidOperation.
+_POS_INF = Decimal('Infinity')
+_NEG_INF = Decimal('-Infinity')
 
-    def __init__(self, blockchain_file='blockchain.json', max_reorg_depth=100):
+
+def _finite(amount):
+    """True bila `amount` bilangan berhingga (bukan NaN/Infinity)."""
+    return amount == amount and amount not in (_POS_INF, _NEG_INF)
+
+
+class ArthaBlockchain:
+    # Nilai lama tetap diekspos untuk kompatibilitas pemanggil; sumber
+    # kebenarannya sekarang di artha_protocol.
+    TOTAL_SUPPLY = P.TOTAL_SUPPLY
+    BLOCK_REWARD_BASE = P.BLOCK_REWARD_BASE
+    HALVING_INTERVAL = P.HALVING_INTERVAL
+    TARGET_BLOCK_TIME_SECONDS = P.TARGET_BLOCK_TIME_V2
+    DIFFICULTY_ADJUSTMENT_INTERVAL = P.DIFFICULTY_ADJUSTMENT_INTERVAL
+
+    def __init__(self, blockchain_file='blockchain.json', max_reorg_depth=P.MAX_REORG_DEPTH):
         self.blockchain_file = blockchain_file
         self.chain = []
         self.pending_transactions = []
@@ -27,9 +41,8 @@ class ArthaBlockchain:
         # Guards chain mutations. The miner thread and the network message
         # thread both write to self.chain, so without this they interleave.
         self.chain_lock = threading.RLock()
-        # Cached (balances, total_issued, total_work) folded over self.chain so
-        # that balance lookups and incremental validation do not rescan every
-        # block. total_work is what decides which competing branch wins.
+        # Cached (balances, total_issued, total_work, nonces) folded over
+        # self.chain so lookups do not rescan every block.
         self._state_cache = None
         self.max_reorg_depth = max_reorg_depth
         self._load_or_create_chain()
@@ -37,18 +50,38 @@ class ArthaBlockchain:
     def _invalidate_cache(self):
         self._state_cache = None
 
+    @staticmethod
+    def _backup_file(path):
+        backup = path + '.bak-' + time.strftime('%Y%m%d%H%M%S')
+        try:
+            shutil.copy2(path, backup)
+            return backup
+        except OSError:
+            return None
+
     def _load_or_create_chain(self):
-        loaded_chain = load_json_file(self.blockchain_file)
-        if loaded_chain and self.is_chain_valid(loaded_chain):
-            self.chain = loaded_chain
-            self._warm_cache()
-            logger.info(f"Blockchain loaded. Height: {len(self.chain) - 1}")
-        else:
-            if loaded_chain:
-                logger.warning("Loaded blockchain is invalid. Creating new one.")
-            else:
-                logger.info("Blockchain file not found. Creating genesis block.")
-            self.create_genesis_block(200000)
+        path = os.path.join(get_data_dir(), self.blockchain_file)
+        if os.path.exists(path):
+            loaded = load_json_file(self.blockchain_file)
+            if loaded and self.is_chain_valid(loaded):
+                self.chain = loaded
+                self._warm_cache()
+                logger.info(f"Blockchain loaded. Height: {len(self.chain) - 1}")
+                return
+            # Jangan pernah menimpa chain yang ada hanya karena gagal validasi.
+            # Backup dulu lalu berhenti supaya data tidak hilang diam-diam.
+            backup = self._backup_file(path)
+            logger.critical(f"blockchain.json ada tetapi INVALID. Tidak ditimpa. Backup: {backup}")
+            raise RuntimeError(
+                "Blockchain file invalid; refusing to overwrite to avoid data loss. "
+                f"Backup kept at: {backup}"
+            )
+        logger.info("Blockchain file not found. Creating genesis block.")
+        self.create_genesis_block(P.GENESIS_DIFFICULTY)
+
+    # ------------------------------------------------------------------
+    # Work / state cache
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _block_work(block):
@@ -62,8 +95,8 @@ class ArthaBlockchain:
         return sum(self._block_work(b) for b in chain)
 
     def _warm_cache(self):
-        """Fold the whole chain into (balances, total_issued, total_work) without re-validating."""
-        balances, total_issued, total_work = {}, Decimal('0'), 0
+        """Fold the whole chain into (balances, total_issued, total_work, nonces)."""
+        balances, total_issued, total_work, nonces = {}, Decimal('0'), 0, {}
         for block in self.chain:
             total_work += self._block_work(block)
             for tx in block.get('transactions', []):
@@ -71,26 +104,63 @@ class ArthaBlockchain:
                     amount = Decimal(tx['amount'])
                 except Exception:
                     continue
-                if tx['sender'] != '0':
-                    balances[tx['sender']] = balances.get(tx['sender'], Decimal('0')) - amount
-                balances[tx['recipient']] = balances.get(tx['recipient'], Decimal('0')) + amount
-                if tx['sender'] == '0':
-                    total_issued += amount
-        self._state_cache = (balances, total_issued, total_work)
+                sender = tx.get('sender')
+                recipient = tx.get('recipient')
+                if sender != '0':
+                    fee = Decimal(tx['fee']) if 'fee' in tx else Decimal('0')
+                    balances[sender] = balances.get(sender, Decimal('0')) - amount - fee
+                    balances[recipient] = balances.get(recipient, Decimal('0')) + amount
+                    if 'nonce' in tx:
+                        try:
+                            n = int(tx['nonce'])
+                        except (TypeError, ValueError):
+                            n = None
+                        if n is not None:
+                            nonces[sender] = max(nonces.get(sender, 0), n + 1)
+                else:
+                    balances[recipient] = balances.get(recipient, Decimal('0')) + amount
+                    reported = tx.get('block_reward')
+                    total_issued += Decimal(reported) if reported is not None else amount
+        self._state_cache = (balances, total_issued, total_work, nonces)
 
     def get_total_issued(self):
-        """Total ARTH issued from coinbase transactions across chain."""
         with self.chain_lock:
             if self._state_cache is None:
                 self._warm_cache()
             return self._state_cache[1]
 
     def get_total_work(self):
-        """Cumulative proof-of-work in the current chain."""
         with self.chain_lock:
             if self._state_cache is None:
                 self._warm_cache()
             return self._state_cache[2]
+
+    def get_balance_snapshot(self):
+        with self.chain_lock:
+            if self._state_cache is None:
+                self._warm_cache()
+            return dict(self._state_cache[0])
+
+    def get_nonce_snapshot(self):
+        with self.chain_lock:
+            if self._state_cache is None:
+                self._warm_cache()
+            return dict(self._state_cache[3])
+
+    def get_balance(self, address) -> Decimal:
+        return self.get_balance_snapshot().get(address, Decimal('0'))
+
+    def get_nonce(self, address):
+        return self.get_nonce_snapshot().get(address, 0)
+
+    def get_next_nonce(self, address):
+        """Nonce berikutnya yang harus dipakai sender: confirmed + pending v2."""
+        base = self.get_nonce(address)
+        pending = sum(
+            1 for t in self.pending_transactions
+            if int(t.get('version', 1)) == 2 and t.get('sender') == address
+        )
+        return base + pending
 
     def get_block_reward(self, height, issued_so_far=None):
         """Calculate block reward at given height with halving + hard cap remainder."""
@@ -103,7 +173,7 @@ class ArthaBlockchain:
             halvings = height // self.HALVING_INTERVAL
             if halvings >= 1:
                 reward = self.BLOCK_REWARD_BASE / (Decimal(2) ** Decimal(halvings))
-        if reward < Decimal('0.00000001'):
+        if reward < P.QUANTUM:
             reward = Decimal('0')
         remaining = self.TOTAL_SUPPLY - issued_so_far
         if reward > remaining:
@@ -112,11 +182,68 @@ class ArthaBlockchain:
             reward = Decimal('0')
         return reward
 
+    # ------------------------------------------------------------------
+    # Difficulty
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _adjust_difficulty(chain, parent_index):
+        interval = P.DIFFICULTY_ADJUSTMENT_INTERVAL
+        last = chain[parent_index]
+        first = chain[parent_index - (interval - 1)]
+        time_taken = last['timestamp'] - first['timestamp']
+        if time_taken <= 0:
+            time_taken = 1
+        expected_time = interval * P.target_block_time(parent_index + 1)
+        ratio = max(0.25, min(4.0, expected_time / time_taken))
+        return max(1, int(last['difficulty'] / ratio))
+
+    @staticmethod
+    def _expected_difficulty(chain, index):
+        """
+        Difficulty yang WAJIB dibawa blok pada index `index`, dihitung dari
+        konteks chain. Direplikasi persis dari algoritma yang dipakai miner,
+        jadi chain historis tetap lolos. Lantai (min_difficulty) aktif sejak v2.
+        """
+        if index <= 0:
+            return None
+        parent_index = index - 1
+        if parent_index < P.DIFFICULTY_ADJUSTMENT_INTERVAL:
+            base = P.GENESIS_DIFFICULTY
+        elif parent_index % P.DIFFICULTY_ADJUSTMENT_INTERVAL == 0:
+            base = ArthaBlockchain._adjust_difficulty(chain, parent_index)
+        else:
+            base = chain[parent_index]['difficulty']
+        return max(P.min_difficulty(index), base)
+
+    def get_current_difficulty(self, height=None):
+        with self.chain_lock:
+            if not self.chain:
+                return P.GENESIS_DIFFICULTY
+            if height is None:
+                height = len(self.chain)
+            expected = self._expected_difficulty(self.chain, height)
+            return expected if expected is not None else P.GENESIS_DIFFICULTY
+
+    def is_valid_proof(self, last_block_hash, nonce, difficulty):
+        guess = f'{last_block_hash}{nonce}'.encode('utf-8')
+        guess_hash = hashlib.sha256(guess).hexdigest()
+        target = (2**256 - 1) // (difficulty if difficulty > 0 else 1)
+        return int(guess_hash, 16) <= target
+
+    def hash_block(self, block):
+        algo = block.get('hash_algo', P.HASH_ALGO_DEFAULT)
+        return hash_data(json_serialize({k: v for k, v in block.items() if k != 'hash'}), algo)
+
+    # ------------------------------------------------------------------
+    # Genesis & block production
+    # ------------------------------------------------------------------
+
     def create_genesis_block(self, initial_difficulty):
         self.chain = []
         genesis_block = {
             'index': 0,
-            'timestamp': 0,  # deterministic genesis for P2P sync
+            'timestamp': 0,
             'transactions': [],
             'nonce': 0,
             'previous_hash': '0',
@@ -129,101 +256,233 @@ class ArthaBlockchain:
         logger.info("Genesis block created.")
 
     def new_block(self, nonce, previous_hash, miner_address, difficulty=None):
-        issued_now = self.get_total_issued()
-        if issued_now >= self.TOTAL_SUPPLY:
-            logger.info("Maximum supply already reached. Cannot create new block.")
-            return None
-        reward = self.get_block_reward(self.get_current_block_height(), issued_now)
-        if reward <= Decimal('0'):
-            logger.info("Maximum supply reached. Cannot mint new block reward.")
-            return None
+        with self.chain_lock:
+            block_index = len(self.chain)
+            issued_now = self.get_total_issued()
+            if issued_now >= self.TOTAL_SUPPLY:
+                logger.info("Maximum supply already reached. Cannot create new block.")
+                return None
+            reward = self.get_block_reward(block_index - 1, issued_now)
+            if reward <= Decimal('0'):
+                logger.info("Maximum supply reached. Cannot mint new block reward.")
+                return None
 
-        canonical_reward = "{:.8f}".format(reward)
-        coinbase_tx = {
-            'sender': '0', 'recipient': miner_address, 'amount': canonical_reward,
-            'timestamp': time.time(), 'signature': 'coinbase', 'public_key_str': 'coinbase'
-        }
-        
-        temp_balances = self.get_balance_snapshot()
-        transactions_for_block = [coinbase_tx]
-        included_tx_ids = set()
-        
-        temp_balances[miner_address] = temp_balances.get(miner_address, Decimal('0')) + reward
-        
-        for tx in sorted(self.pending_transactions, key=lambda t: t['timestamp']):
-            sender, recipient, amount = tx['sender'], tx['recipient'], Decimal(tx['amount'])
-            sender_balance = temp_balances.get(sender, Decimal('0'))
-            
-            tx_data = {'sender': sender, 'recipient': recipient, 'amount': tx['amount']}
-            if sender_balance >= amount and ArthaWallet.verify_signature(tx_data, tx['public_key_str'], tx['signature']):
-                transactions_for_block.append(tx)
-                included_tx_ids.add(self._calculate_transaction_id(tx))
-                temp_balances[sender] -= amount
-                temp_balances[recipient] = temp_balances.get(recipient, Decimal('0')) + amount
-        
-        return {
-            'index': len(self.chain), 'timestamp': time.time(), 'transactions': transactions_for_block,
-            'nonce': nonce, 'previous_hash': previous_hash, 'miner_address': miner_address,
-            'difficulty': difficulty if difficulty is not None else self.get_current_difficulty()
-        }
+            v2 = P.is_v2(block_index)
+            temp_balances = self.get_balance_snapshot()
+            temp_nonce = self.get_nonce_snapshot()
+            selected = []
+            total_fees = Decimal('0')
+            size = 0
+
+            if v2:
+                pending = sorted(
+                    self.pending_transactions,
+                    key=lambda t: (-Decimal(t.get('fee', '0')), t.get('timestamp', 0))
+                )
+            else:
+                pending = sorted(self.pending_transactions, key=lambda t: t['timestamp'])
+
+            for tx in pending:
+                if v2:
+                    if tx.get('version') != 2:
+                        continue
+                    try:
+                        amount = Decimal(tx['amount'])
+                        fee = Decimal(tx.get('fee', '0'))
+                    except Exception:
+                        continue
+                    if fee < P.MIN_TX_FEE:
+                        continue
+                    sender = tx['sender']
+                    if temp_balances.get(sender, Decimal('0')) < amount + fee:
+                        continue
+                    if int(tx.get('nonce', -1)) != temp_nonce.get(sender, 0):
+                        continue
+                    if not self._verify_tx_v2(tx):
+                        continue
+                    tx_size = len(json_serialize(tx))
+                    if len(selected) >= P.MAX_TXS_PER_BLOCK or size + tx_size > P.MAX_BLOCK_BYTES:
+                        break
+                    selected.append(tx)
+                    size += tx_size
+                    temp_balances[sender] = temp_balances.get(sender, Decimal('0')) - amount - fee
+                    temp_balances[tx['recipient']] = temp_balances.get(tx['recipient'], Decimal('0')) + amount
+                    temp_nonce[sender] = temp_nonce.get(sender, 0) + 1
+                    total_fees += fee
+                else:
+                    sender, recipient = tx['sender'], tx['recipient']
+                    try:
+                        amount = Decimal(tx['amount'])
+                    except Exception:
+                        continue
+                    sender_balance = temp_balances.get(sender, Decimal('0'))
+                    tx_data = {'sender': sender, 'recipient': recipient, 'amount': tx['amount']}
+                    if sender_balance >= amount and ArthaWallet.verify_signature(tx_data, tx['public_key_str'], tx['signature']):
+                        selected.append(tx)
+                        temp_balances[sender] = sender_balance - amount
+                        temp_balances[recipient] = temp_balances.get(recipient, Decimal('0')) + amount
+
+            if v2:
+                coinbase_tx = {
+                    'sender': '0', 'recipient': miner_address,
+                    'amount': "{:.8f}".format(reward + total_fees),
+                    'block_reward': "{:.8f}".format(reward),
+                    'fees': "{:.8f}".format(total_fees),
+                    'timestamp': time.time(), 'signature': 'coinbase', 'public_key_str': 'coinbase'
+                }
+            else:
+                coinbase_tx = {
+                    'sender': '0', 'recipient': miner_address,
+                    'amount': "{:.8f}".format(reward),
+                    'timestamp': time.time(), 'signature': 'coinbase', 'public_key_str': 'coinbase'
+                }
+
+            block = {
+                'index': block_index, 'timestamp': time.time(),
+                'transactions': [coinbase_tx] + selected, 'nonce': nonce,
+                'previous_hash': previous_hash, 'miner_address': miner_address,
+                'difficulty': difficulty if difficulty is not None else self.get_current_difficulty(),
+            }
+            if v2:
+                block['version'] = P.PROTOCOL_VERSION
+                block['hash_algo'] = P.hash_algo_for(block_index)
+            return block
+
+    def _verify_tx_v2(self, tx):
+        try:
+            if ArthaWallet.address_from_public_key(tx['public_key_str']) != tx['sender']:
+                return False
+            return ArthaWallet.verify_signature(
+                ArthaWallet.v2_signed_payload(tx), tx['public_key_str'], tx['signature']
+            )
+        except Exception:
+            return False
 
     def _calculate_transaction_id(self, tx):
-        keys = ['sender', 'recipient', 'amount', 'timestamp', 'signature']
+        keys = ['sender', 'recipient', 'amount', 'timestamp', 'signature', 'fee', 'nonce', 'version']
         unique_data = {k: tx.get(k) for k in keys}
         return hash_data(json_serialize(unique_data))
 
-    def add_transaction(self, sender, recipient, amount, signature, public_key_str, timestamp=None):
+    # ------------------------------------------------------------------
+    # Mempool
+    # ------------------------------------------------------------------
+
+    def add_transaction(self, sender, recipient, amount, signature, public_key_str,
+                        timestamp=None, fee=None, nonce=None, version=1, chain_id=None):
+        """
+        Bangun transaksi (v1 atau v2) lalu submit. `version=2` atau `nonce`
+        diberikan akan memakai format v2 (timestamp/nonce/fee ditandatangani).
+        """
         try:
             amount_decimal = Decimal(amount)
-        except:
-            return None
-        
-        if amount_decimal < Decimal('0'):
-            return None
-        
-        if self.get_balance(sender) < amount_decimal:
-            return None
-        
-        canonical_amount_str = "{:.8f}".format(amount_decimal)
-        tx_data = {'sender': sender, 'recipient': recipient, 'amount': canonical_amount_str}
-        
-        if not ArthaWallet.verify_signature(tx_data, public_key_str, signature): return None
-        
-        transaction = {'sender': sender, 'recipient': recipient, 'amount': canonical_amount_str, 
-                       'timestamp': timestamp or time.time(), 'signature': signature, 'public_key_str': public_key_str}
-        
-        tx_id = self._calculate_transaction_id(transaction)
-        transaction['transaction_id'] = tx_id
-
-        # Clean stale known entries (tx not pending anymore)
-        if self.known_pending_tx_hashes:
-            # Rebuild known from current pending to avoid stale
-            current_known = {self._calculate_transaction_id(t) for t in self.pending_transactions}
-            self.known_pending_tx_hashes = current_known
-
-        # Check if already pending
-        if tx_id in self.known_pending_tx_hashes:
+        except Exception:
             return None
 
-        # Check if already confirmed in chain
-        confirmed_ids = {
-            self._calculate_transaction_id(tx)
-            for block in self.chain for tx in block.get('transactions', [])
-            if tx.get('sender') != '0'
-        }
-        if tx_id in confirmed_ids:
-            return None
+        if version == 2 or nonce is not None:
+            tx = {
+                'version': 2, 'chain_id': chain_id or P.CHAIN_ID,
+                'sender': sender, 'recipient': recipient,
+                'amount': "{:.8f}".format(amount_decimal),
+                'fee': "{:.8f}".format(Decimal(fee if fee is not None else P.MIN_TX_FEE)),
+                'nonce': int(nonce if nonce is not None else 0),
+                'timestamp': timestamp if timestamp is not None else time.time(),
+                'signature': signature, 'public_key_str': public_key_str,
+                'sig_algo': P.SIG_ALGO_DEFAULT,
+            }
+        else:
+            tx = {
+                'sender': sender, 'recipient': recipient,
+                'amount': "{:.8f}".format(amount_decimal),
+                'timestamp': timestamp if timestamp is not None else time.time(),
+                'signature': signature, 'public_key_str': public_key_str,
+            }
+        return self.submit_transaction(tx)
 
-        self.pending_transactions.append(transaction)
-        self.known_pending_tx_hashes.add(tx_id)
-        return transaction
+    def submit_transaction(self, tx):
+        """Validasi + dedupe + masukkan ke mempool. Return tx atau None."""
+        with self.chain_lock:
+            height = self.get_current_block_height() + 1
+            v2_required = P.is_v2(height)
+            version = int(tx.get('version', 1))
+
+            try:
+                amount = Decimal(tx['amount'])
+            except Exception:
+                return None
+            if not _finite(amount) or amount <= 0:
+                return None
+
+            sender = tx.get('sender')
+            recipient = tx.get('recipient')
+            public_key_str = tx.get('public_key_str')
+            if not sender or not recipient or not public_key_str:
+                return None
+
+            # Ikatan sender <-> public key. Ini menutup pencurian saldo: tanpa
+            # ini siapa pun bisa menandatangani tx dengan kunci sendiri sambil
+            # menulis sender = alamat korban.
+            if ArthaWallet.address_from_public_key(public_key_str) != sender:
+                return None
+
+            if v2_required and version != 2:
+                return None
+
+            if version == 2:
+                if tx.get('sig_algo', P.SIG_ALGO_DEFAULT) not in P.SIG_ALGOS:
+                    return None
+                try:
+                    fee = Decimal(tx.get('fee', '0'))
+                except Exception:
+                    return None
+                if not _finite(fee) or fee < P.MIN_TX_FEE:
+                    return None
+                ts = tx.get('timestamp', 0)
+                now = time.time()
+                if ts > now + P.MAX_FUTURE_DRIFT or ts < now - P.MAX_PAST_DRIFT:
+                    return None
+                if self.get_balance(sender) < amount + fee:
+                    return None
+                if int(tx.get('nonce', -1)) != self.get_next_nonce(sender):
+                    return None
+                if not self._verify_tx_v2(tx):
+                    return None
+            else:
+                if self.get_balance(sender) < amount:
+                    return None
+                tx_data = {'sender': sender, 'recipient': recipient, 'amount': tx['amount']}
+                if not ArthaWallet.verify_signature(tx_data, public_key_str, tx.get('signature')):
+                    return None
+
+            tx_id = self._calculate_transaction_id(tx)
+            tx['transaction_id'] = tx_id
+            self.known_pending_tx_hashes = {
+                self._calculate_transaction_id(t) for t in self.pending_transactions
+            }
+            if tx_id in self.known_pending_tx_hashes:
+                return None
+
+            confirmed_ids = {
+                self._calculate_transaction_id(t)
+                for block in self.chain for t in block.get('transactions', [])
+                if t.get('sender') != '0'
+            }
+            if tx_id in confirmed_ids:
+                return None
+
+            if len(self.pending_transactions) >= P.MAX_MEMPOOL_TXS:
+                return None
+
+            self.pending_transactions.append(tx)
+            self.known_pending_tx_hashes.add(tx_id)
+            return tx
+
+    # ------------------------------------------------------------------
+    # Chain views
+    # ------------------------------------------------------------------
 
     @property
     def last_block(self):
         return self.chain[-1] if self.chain else None
-
-    def hash_block(self, block):
-        return hash_data(json_serialize({k: v for k, v in block.items() if k != 'hash'}))
 
     def get_current_block_height(self):
         return len(self.chain) - 1
@@ -234,62 +493,53 @@ class ArthaBlockchain:
         return max(0, self.get_current_block_height() - block_height)
 
     def is_transaction_finalized(self, tx_id, min_confirmations=6):
-        # Search in chain for tx_id; return True if found deep enough
         with self.chain_lock:
             cur = self.get_current_block_height()
-            for i, block in enumerate(reversed(self.chain)):
+            for block in reversed(self.chain):
                 for tx in block.get('transactions', []):
-                    if tx.get('sender') == '0': continue
+                    if tx.get('sender') == '0':
+                        continue
                     if self._calculate_transaction_id(tx) == tx_id:
                         height = block['index']
                         return (cur - height + 1) >= min_confirmations
             return False
 
-    def get_balance_snapshot(self):
-        with self.chain_lock:
-            if self._state_cache is None:
-                self._warm_cache()
-            return dict(self._state_cache[0])
+    def get_chain(self):
+        return list(self.chain)
 
-    def get_balance(self, address) -> Decimal:
-        return self.get_balance_snapshot().get(address, Decimal('0'))
+    def get_pending_transactions(self):
+        return list(self.pending_transactions)
 
-    def get_current_difficulty(self):
-        if not self.chain or self.last_block['index'] < self.DIFFICULTY_ADJUSTMENT_INTERVAL: 
-            return 200000
-        last_block = self.last_block
-        if (last_block['index'] % self.DIFFICULTY_ADJUSTMENT_INTERVAL == 0):
-            return self.calculate_difficulty(last_block)
-        return last_block['difficulty']
+    def get_pending_tx_count(self):
+        return len(self.pending_transactions)
 
-    def calculate_difficulty(self, last_block):
-        first_block = self.chain[-(self.DIFFICULTY_ADJUSTMENT_INTERVAL)]
-        time_taken = last_block['timestamp'] - first_block['timestamp']
-        expected_time = self.DIFFICULTY_ADJUSTMENT_INTERVAL * self.TARGET_BLOCK_TIME_SECONDS
-        if time_taken <= 0: time_taken = 1
-        ratio = max(0.25, min(4.0, expected_time / time_taken))
-        return max(1, int(last_block['difficulty'] / ratio))
+    def remove_pending_transactions(self, tx_ids):
+        if not tx_ids:
+            return
+        tx_ids_set = set(tx_ids)
+        self.pending_transactions = [
+            tx for tx in self.pending_transactions
+            if self._calculate_transaction_id(tx) not in tx_ids_set
+        ]
+        self.known_pending_tx_hashes = {
+            self._calculate_transaction_id(tx) for tx in self.pending_transactions
+        }
 
-    def is_valid_proof(self, last_block_hash, nonce, difficulty):
-        guess = f'{last_block_hash}{nonce}'.encode('utf-8')
-        guess_hash = hashlib.sha256(guess).hexdigest()
-        target = (2**256 - 1) // (difficulty if difficulty > 0 else 1)
-        return int(guess_hash, 16) <= target
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
 
     def is_chain_valid(self, chain_to_validate):
-        """Validate a chain from genesis. Returns True/False."""
         ok, _reason, _state = self._validate_chain(chain_to_validate)
         return ok
 
     def _validate_chain(self, chain_to_validate, base_state=None, start_index=0):
         """
-        Validate a chain, optionally only the part that follows an already
-        accepted prefix. This is what makes catching up cheap: syncing 2 missing
-        blocks validates 2 blocks instead of re-verifying every RSA signature
-        in the whole chain.
-
-        Returns (ok, reason, final_state) where final_state is
-        (balances, total_issued) folded over the validated chain.
+        Validate a chain, optionally only the part that follows an accepted
+        prefix (cheap catch-up). Activation-aware: blocks below ACTIVATION_V2
+        use the original rules (so history stays valid), blocks at/after it
+        use the v2 rules (difficulty schedule enforced, sender<->pubkey bound,
+        nonce replay protection, fees, size caps).
         """
         if not chain_to_validate:
             return False, 'empty chain', None
@@ -297,17 +547,17 @@ class ArthaBlockchain:
             return False, 'invalid genesis block', None
 
         if base_state is None:
-            current_balances, total_issued, total_work = {}, Decimal('0'), 0
+            current_balances, total_issued, total_work, nonces = {}, Decimal('0'), 0, {}
         else:
             current_balances = dict(base_state[0])
             total_issued, total_work = base_state[1], base_state[2]
+            nonces = dict(base_state[3])
 
+        now = time.time()
         for i in range(start_index, len(chain_to_validate)):
             block = chain_to_validate[i]
             total_work += self._block_work(block)
 
-            # Guards against duplicate / out-of-order indexes, which is exactly
-            # what a node sees when it is sent a block it already has.
             if block.get('index') != i:
                 return False, f'index mismatch at position {i} (block says {block.get("index")})', None
 
@@ -317,52 +567,125 @@ class ArthaBlockchain:
                     return False, f'previous_hash mismatch at block {i}', None
                 if not self.is_valid_proof(block['previous_hash'], block.get('nonce'), block.get('difficulty')):
                     return False, f'invalid proof of work at block {i}', None
+                expected_diff = self._expected_difficulty(chain_to_validate, i)
+                if expected_diff is not None and block.get('difficulty') != expected_diff:
+                    return False, (
+                        f'invalid difficulty at block {i}: '
+                        f'{block.get("difficulty")} != {expected_diff}'
+                    ), None
+
+            v2 = P.is_v2(i)
+            if v2:
+                ts = block.get('timestamp', 0)
+                if i > 0 and ts < chain_to_validate[i - 1].get('timestamp', 0):
+                    return False, f'non-monotonic timestamp at block {i}', None
+                if ts > now + P.MAX_FUTURE_DRIFT:
+                    return False, f'block {i} timestamp too far in future', None
+                txs = block.get('transactions', [])
+                if len(txs) > P.MAX_TXS_PER_BLOCK:
+                    return False, f'too many transactions at block {i}', None
+                if len(json_serialize(block)) > P.MAX_BLOCK_BYTES:
+                    return False, f'block {i} too large', None
 
             coinbase_count = 0
             coinbase_amount = Decimal('0')
-            # Prevent double-spend within same block
+            coinbase_reward = Decimal('0')
+            fees_sum = Decimal('0')
             seen_tx_in_block = set()
+
             for tx in block.get('transactions', []):
-                amount = Decimal(tx['amount'])
+                try:
+                    amount = Decimal(tx['amount'])
+                except Exception:
+                    return False, f'unparseable amount at block {i}', None
+                if not _finite(amount):
+                    return False, f'non-finite amount at block {i}', None
+
                 if tx['sender'] == '0':
                     coinbase_count += 1
                     coinbase_amount += amount
+                    reported = tx.get('block_reward')
+                    coinbase_reward += Decimal(reported) if reported is not None else amount
                     current_balances[tx['recipient']] = current_balances.get(tx['recipient'], Decimal('0')) + amount
                     continue
 
-                current_balances.setdefault(tx['sender'], Decimal('0'))
-                if current_balances[tx['sender']] < amount:
-                    return False, f'insufficient balance at block {i}', None
+                if v2:
+                    if tx.get('version') != 2:
+                        return False, f'v1 transaction in v2 block {i}', None
+                    if tx.get('sig_algo', P.SIG_ALGO_DEFAULT) not in P.SIG_ALGOS:
+                        return False, f'unknown signature algorithm at block {i}', None
+                    if amount <= 0:
+                        return False, f'non-positive amount at block {i}', None
+                    try:
+                        fee = Decimal(tx.get('fee', '0'))
+                    except Exception:
+                        return False, f'unparseable fee at block {i}', None
+                    if not _finite(fee) or fee < P.MIN_TX_FEE:
+                        return False, f'fee below minimum at block {i}', None
+                    if ArthaWallet.address_from_public_key(tx['public_key_str']) != tx['sender']:
+                        return False, f'sender/public-key mismatch at block {i}', None
+                    sender = tx['sender']
+                    if int(tx.get('nonce', -1)) != nonces.get(sender, 0):
+                        return False, f'bad nonce at block {i}', None
+                    if current_balances.get(sender, Decimal('0')) < amount + fee:
+                        return False, f'insufficient balance at block {i}', None
+                    if not ArthaWallet.verify_signature(
+                        ArthaWallet.v2_signed_payload(tx), tx['public_key_str'], tx['signature']
+                    ):
+                        return False, f'invalid transaction signature at block {i}', None
+                    tx_ts = tx.get('timestamp', 0)
+                    if tx_ts > now + P.MAX_FUTURE_DRIFT or tx_ts < now - P.MAX_PAST_DRIFT:
+                        return False, f'transaction timestamp out of range at block {i}', None
 
-                tx_data = {'sender': tx['sender'], 'recipient': tx['recipient'], 'amount': tx['amount']}
-                if not ArthaWallet.verify_signature(tx_data, tx['public_key_str'], tx['signature']):
-                    return False, f'invalid transaction signature at block {i}', None
+                    txid = self._calculate_transaction_id(tx)
+                    if txid in seen_tx_in_block:
+                        return False, f'double spend in same block {i}', None
+                    seen_tx_in_block.add(txid)
 
-                txid = self._calculate_transaction_id(tx)
-                if txid in seen_tx_in_block:
-                    return False, f'double spend in same block {i}', None
-                seen_tx_in_block.add(txid)
-
-                current_balances[tx['sender']] -= amount
-                current_balances[tx['recipient']] = current_balances.get(tx['recipient'], Decimal('0')) + amount
+                    current_balances[sender] = current_balances.get(sender, Decimal('0')) - amount - fee
+                    current_balances[tx['recipient']] = current_balances.get(tx['recipient'], Decimal('0')) + amount
+                    nonces[sender] = nonces.get(sender, 0) + 1
+                    fees_sum += fee
+                else:
+                    # Aturan v1: historis, tanpa nonce/fee/binding.
+                    sender = tx['sender']
+                    current_balances.setdefault(sender, Decimal('0'))
+                    if current_balances[sender] < amount:
+                        return False, f'insufficient balance at block {i}', None
+                    tx_data = {'sender': sender, 'recipient': tx['recipient'], 'amount': tx['amount']}
+                    if not ArthaWallet.verify_signature(tx_data, tx['public_key_str'], tx['signature']):
+                        return False, f'invalid transaction signature at block {i}', None
+                    txid = self._calculate_transaction_id(tx)
+                    if txid in seen_tx_in_block:
+                        return False, f'double spend in same block {i}', None
+                    seen_tx_in_block.add(txid)
+                    current_balances[sender] -= amount
+                    current_balances[tx['recipient']] = current_balances.get(tx['recipient'], Decimal('0')) + amount
 
             if coinbase_count > 1:
                 return False, f'multiple coinbase transactions at block {i}', None
             if block['index'] > 0:
                 expected_reward = self.get_block_reward(block['index'] - 1, total_issued)
-                if abs(coinbase_amount - expected_reward) > Decimal('0.00000001'):
-                    return False, f'incorrect coinbase reward at block {i}', None
-            total_issued += coinbase_amount
-            if total_issued > self.TOTAL_SUPPLY + Decimal('0.00000001'):
+                if v2:
+                    if abs(coinbase_reward - expected_reward) > P.QUANTUM:
+                        return False, f'incorrect coinbase reward at block {i}', None
+                    if abs(coinbase_amount - (expected_reward + fees_sum)) > P.QUANTUM:
+                        return False, f'incorrect coinbase+fees at block {i}', None
+                else:
+                    if abs(coinbase_amount - expected_reward) > P.QUANTUM:
+                        return False, f'incorrect coinbase reward at block {i}', None
+            total_issued += coinbase_reward
+            if total_issued > self.TOTAL_SUPPLY + P.QUANTUM:
                 return False, f'supply cap exceeded at block {i}', None
 
-        return True, None, (current_balances, total_issued, total_work)
+        return True, None, (current_balances, total_issued, total_work, nonces)
+
+    # ------------------------------------------------------------------
+    # Chain mutation
+    # ------------------------------------------------------------------
 
     def add_block(self, block):
-        """
-        Validate and append a single block that extends the current tip.
-        Returns True only when the block was actually stored.
-        """
+        """Validate and append a single block that extends the tip."""
         with self.chain_lock:
             last_block = self.last_block
             if not last_block or block.get('previous_hash') != self.hash_block(last_block):
@@ -387,7 +710,6 @@ class ArthaBlockchain:
             return True
 
     def _drop_confirmed_transactions(self):
-        """Remove pending transactions that are already confirmed in the chain."""
         confirmed_ids = {
             self._calculate_transaction_id(tx)
             for block in self.chain for tx in block.get('transactions', [])
@@ -402,16 +724,7 @@ class ArthaBlockchain:
         }
 
     def _outranks_current(self, new_chain):
-        """
-        Decide whether an incoming chain should replace ours.
-
-        Longer always wins. When two branches are the same length the old code
-        refused both, which meant a fork between two miners could never resolve
-        and the losing node asked for the same block forever. So ties are broken
-        by total proof-of-work, then by tip hash. Every node applies the same
-        rule to the same pair of chains, so the network converges on one branch
-        instead of deadlocking.
-        """
+        """Longer wins; ties broken by total work, then tip hash (deterministic)."""
         new_len, cur_len = len(new_chain), len(self.chain)
         if new_len != cur_len:
             return new_len > cur_len
@@ -419,7 +732,7 @@ class ArthaBlockchain:
         new_tip = self.hash_block(new_chain[-1])
         cur_tip = self.hash_block(self.chain[-1])
         if new_tip == cur_tip:
-            return False  # identical tip, nothing to do
+            return False
 
         if self._state_cache is None:
             self._warm_cache()
@@ -432,14 +745,12 @@ class ArthaBlockchain:
     def _restore_orphaned_transactions(self, old_chain, new_chain):
         """Restore non-coinbase transactions from orphaned blocks back to mempool."""
         try:
-            # Get confirmed tx_ids in new chain
             confirmed_in_new = set()
             for block in new_chain:
                 for tx in block.get('transactions', []):
                     if tx.get('sender') != '0':
                         confirmed_in_new.add(self._calculate_transaction_id(tx))
 
-            # Collect orphaned txs from old chain (not confirmed in new)
             orphan_txs = []
             for block in old_chain:
                 for tx in block.get('transactions', []):
@@ -451,13 +762,11 @@ class ArthaBlockchain:
             if not orphan_txs:
                 return
 
-            # Merge into pending, avoid duplicates
             existing_ids = set(self.known_pending_tx_hashes)
             added = 0
             for tx in orphan_txs:
                 tx_id = self._calculate_transaction_id(tx)
-                if tx_id not in existing_ids:
-                    # Ensure tx has tx_id
+                if tx_id not in existing_ids and len(self.pending_transactions) < P.MAX_MEMPOOL_TXS:
                     if 'transaction_id' not in tx:
                         tx['transaction_id'] = tx_id
                     self.pending_transactions.append(tx)
@@ -470,16 +779,11 @@ class ArthaBlockchain:
             logger.warning(f'Failed to restore orphaned transactions: {e}')
 
     def replace_chain(self, new_chain):
-        """
-        Adopt a chain received from a peer when it outranks ours.
-        Returns True only when the chain was actually replaced, so callers never
-        announce a sync that did not happen.
-        """
+        """Adopt a chain received from a peer when it outranks ours."""
         with self.chain_lock:
             if not new_chain:
                 return False
 
-            # Reorg depth protection
             old_height = self.get_current_block_height()
             new_height = len(new_chain) - 1
             reorg_depth = old_height - new_height if new_height < old_height else 0
@@ -503,49 +807,21 @@ class ArthaBlockchain:
             self.chain = new_chain
             self._state_cache = state
             self._drop_confirmed_transactions()
-            # Restore orphaned txs from old chain
             self._restore_orphaned_transactions(old_chain, self.chain)
             self.save_chain()
             logger.info(f'Chain reorg completed: new tip #{self.last_block["index"]} (old {old_height})')
             return True
 
-    def get_chain(self):
-        return list(self.chain)
-
-    def get_pending_transactions(self):
-        return list(self.pending_transactions)
-
-    def get_pending_tx_count(self):
-        return len(self.pending_transactions)
-
-    def remove_pending_transactions(self, tx_ids):
-        if not tx_ids:
-            return
-        tx_ids_set = set(tx_ids)
-        self.pending_transactions = [
-            tx for tx in self.pending_transactions
-            if self._calculate_transaction_id(tx) not in tx_ids_set
-        ]
-        self.known_pending_tx_hashes = {
-            self._calculate_transaction_id(tx) for tx in self.pending_transactions
-        }
-
     def invalidate_last_blocks(self, n=1):
-        """
-        BTC-style: Unvalidate/invalidate last n blocks from tip.
-        Rewinds chain by n blocks. Restores orphaned transactions back to mempool.
-        Backward compatible method name (also add aliases: unvalidate_last_blocks, pop_last_blocks)
-        """
+        """Rewind chain by n blocks, restoring orphaned txs to mempool."""
         if n < 1:
             return False
         with self.chain_lock:
-            if len(self.chain) <= 1:  # cannot invalidate genesis
+            if len(self.chain) <= 1:
                 return False
             n = min(n, len(self.chain) - 1)
             old_chain = list(self.chain)
-            # New chain = old chain without last n blocks
             new_chain = old_chain[:-n]
-            # Validate the new prefix
             ok, reason, state = self._validate_chain(new_chain)
             if not ok:
                 logger.warning(f'Cannot invalidate last {n} blocks: {reason}')

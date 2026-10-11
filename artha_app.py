@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from artha_blockchain import ArthaBlockchain
 from artha_wallet import ArthaWallet
 from artha_node import ArthaNode
+import artha_protocol as P
 
 APP_HOST = '0.0.0.0'
 APP_PORT = 5000
@@ -135,15 +136,26 @@ def sync_blockchain_with_animation(node, blockchain, min_wait=3):
 
     total_blocks_to_sync = best - height
     print(f"[⚡] Height lokal: {height} | Target Jaringan: {best} ({total_blocks_to_sync} blok tertinggal)")
-    print("[🔄] Memproses pengunduhan dan validasi blok ke blockchain.json...")
+    print("[🔄] Mengunduh dan memvalidasi blok...")
 
-    start_time = time.time()
+    # Matikan sementara console logging agar tidak tercampur dengan animasi
+    root_logger = logging.getLogger()
+    console_handlers = [
+        h for h in root_logger.handlers
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+    ]
+    for h in console_handlers:
+        h.setLevel(logging.CRITICAL)
+
     initial_height = height
     last_height = height
     last_progress_time = time.time()
     stall_count = 0
     spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
     spin_idx = 0
+    # Rolling speed window: list of (timestamp, height)
+    speed_samples = [(time.time(), initial_height)]
+    SPEED_WINDOW = 5.0
 
     try:
         while True:
@@ -151,15 +163,31 @@ def sync_blockchain_with_animation(node, blockchain, min_wait=3):
             cur_height = cur_status['height']
             target_height = max(cur_status['best_known_height'], best)
             best = target_height
-            
+            now_t = time.time()
+
             if cur_height > last_height:
                 last_height = cur_height
-                last_progress_time = time.time()
+                last_progress_time = now_t
                 stall_count = 0
-            
+                speed_samples.append((now_t, cur_height))
+
+            # Trim samples di luar window
+            speed_samples = [(t, h) for t, h in speed_samples if now_t - t <= SPEED_WINDOW]
+            if not speed_samples:
+                speed_samples = [(now_t, cur_height)]
+
+            # Hitung speed dari rolling window
+            if len(speed_samples) >= 2:
+                t0, h0 = speed_samples[0]
+                t1, h1 = speed_samples[-1]
+                dt = t1 - t0
+                speed = (h1 - h0) / dt if dt > 0.1 else 0.0
+            else:
+                speed = 0.0
+
             blocks_synced = cur_height - initial_height
             total_target = target_height - initial_height
-            
+
             if total_target <= 0:
                 pct = 100.0
             else:
@@ -169,11 +197,8 @@ def sync_blockchain_with_animation(node, blockchain, min_wait=3):
             filled_len = int(bar_len * pct // 100)
             bar = '█' * filled_len + '░' * (bar_len - filled_len)
 
-            elapsed = time.time() - start_time
-            speed = blocks_synced / elapsed if elapsed > 0.5 else 0.0
-            
             remaining_blocks = target_height - cur_height
-            if speed > 0 and remaining_blocks > 0:
+            if speed > 0.01 and remaining_blocks > 0:
                 eta_sec = int(remaining_blocks / speed)
                 m, s = divmod(eta_sec, 60)
                 eta_str = f"{m:02d}:{s:02d}"
@@ -184,24 +209,27 @@ def sync_blockchain_with_animation(node, blockchain, min_wait=3):
             spin_idx += 1
 
             sys.stdout.write(
-                f"\r{sym} Sync: [{bar}] {pct:5.1f}% | Blok: {cur_height}/{target_height} | "
-                f"Spd: {speed:4.1f} blk/s | ETA: {eta_str} | Peer: {cur_status['peers']}  "
+                f"\r{sym} Sync: [{bar}] {pct:5.1f}% | "
+                f"Blok: {cur_height}/{target_height} | "
+                f"Spd: {speed:5.1f} blk/s | "
+                f"ETA: {eta_str} | Peer: {cur_status['peers']}  "
             )
             sys.stdout.flush()
 
             if cur_height >= target_height and cur_status['in_sync']:
                 break
 
-            stall_sec = time.time() - last_progress_time
-            if stall_sec > 1.0 and cur_height < target_height:
+            stall_sec = now_t - last_progress_time
+            if stall_sec > 2.0 and cur_height < target_height:
                 stall_count += 1
-                # Broadcast GET_BLOCKS to ALL peers - fast & incremental.
-                # REQUEST_CHAIN is NOT used here because it blocks the
-                # message loop while verifying RSA sigs for thousands of blocks.
-                node.request_blocks_from_all_peers(cur_height + 1)
-                last_progress_time = time.time()
+                if stall_count % 5 == 0:
+                    # Escalate ke full resync setelah ~10 detik stuck
+                    node.trigger_full_resync()
+                else:
+                    node.request_blocks_from_all_peers(cur_height + 1)
+                last_progress_time = now_t
 
-            time.sleep(0.2)
+            time.sleep(0.15)
 
         sys.stdout.write(f"\r[✓] Sync: [{'█'*bar_len}] 100.0% | Blok: {cur_height}/{best} | Selesai!                          \n")
         sys.stdout.flush()
@@ -209,9 +237,15 @@ def sync_blockchain_with_animation(node, blockchain, min_wait=3):
         print("="*46 + "\n")
         return True
     except KeyboardInterrupt:
-        print("\n[!] Sinkronisasi diinterupsi oleh pengguna.")
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        print("[!] Sinkronisasi diinterupsi oleh pengguna.")
         print("="*46 + "\n")
         return False
+    finally:
+        # Kembalikan level logging console ke INFO
+        for h in console_handlers:
+            h.setLevel(logging.INFO)
 
 def remove_peer(node):
     """Remove a manually added peer."""
@@ -316,29 +350,21 @@ def run_app():
                     print("Jumlah tidak valid.")
                     continue
 
-                if blockchain.get_balance(public_address) < amount:
-                    print("Saldo tidak mencukupi.")
+                fee = P.MIN_TX_FEE
+                if blockchain.get_balance(public_address) < amount + fee:
+                    print(f"Saldo tidak mencukupi (butuh {amount:.8f} + fee {fee:.8f}).")
                     continue
 
-                canonical_amount_str = "{:.8f}".format(amount)
-                transaction_data = {
-                    'sender': public_address,
-                    'recipient': recipient,
-                    'amount': canonical_amount_str
-                }
-                
-                signature = wallet.sign_transaction(transaction_data)
-                
-                added_tx = blockchain.add_transaction(
-                    public_address, recipient, amount, signature, 
-                    wallet.public_key.export_key().decode('utf-8')
-                )
-                
+                # v2: timestamp/nonce/fee ikut ditandatangani, nonce mencegah replay.
+                nonce = blockchain.get_next_nonce(public_address)
+                signed_tx = wallet.build_transaction(recipient, amount, fee, nonce)
+                added_tx = blockchain.submit_transaction(signed_tx)
+
                 if added_tx:
                     logging.info(f"Transaksi {added_tx['transaction_id'][:10]}... berhasil disiarkan.")
                     node.broadcast_message('NEW_TRANSACTION', {
                         'transaction': added_tx,
-                        'public_key_str': wallet.public_key.export_key().decode('utf-8')
+                        'public_key_str': added_tx['public_key_str']
                     })
                     # Tell the network we are behind so peers push their tip to us.
                     node.trigger_full_resync()
@@ -375,8 +401,23 @@ def run_app():
                 if not blockchain.pending_transactions:
                     print("Tidak ada.")
                 else:
+                    v2_active = P.is_v2(blockchain.get_current_block_height() + 1)
                     for tx in blockchain.pending_transactions:
-                        print(f"- Dari: {tx['sender'][:10]}... Jumlah: {tx['amount']}")
+                        sender = tx['sender']
+                        ver = int(tx.get('version', 1))
+                        print(
+                            f"- Dari: {sender[:10]}... Jumlah: {tx['amount']} | "
+                            f"ver: {ver} | fee: {tx.get('fee', '-')} | nonce: {tx.get('nonce', '-')}"
+                        )
+                        print(
+                            f"    saldo terkonfirmasi: {blockchain.get_balance(sender):.8f} | "
+                            f"nonce berikutnya: {blockchain.get_next_nonce(sender)}"
+                        )
+                        if v2_active and ver != 2:
+                            print("    [!] Tx format v1 (lama). Blok sekarang v2 -> TIDAK akan "
+                                  "diproses. Kirim ulang transaksi (pastikan node pakai kode terbaru).")
+                    print("\n(Catatan: tx akan diproses miner hanya jika nonce berurutan, "
+                          "saldo cukup, dan format v2 saat blok sudah v2.)")
 
             elif choice == '10':
                 sync_blockchain_with_animation(node, blockchain, min_wait=1)

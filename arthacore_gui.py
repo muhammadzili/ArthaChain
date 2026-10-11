@@ -15,6 +15,7 @@ from decimal import Decimal, InvalidOperation
 from artha_wallet import ArthaWallet
 from artha_blockchain import ArthaBlockchain
 from artha_node import ArthaNode
+import artha_protocol as P
 
 # --- Konfigurasi Logging ---
 class QueueHandler(logging.Handler):
@@ -280,15 +281,17 @@ class ArthaCore(ThemedTk):
         dialog = SendDialog(self)
         if dialog.recipient and dialog.amount:
             recipient, amount = dialog.recipient, dialog.amount
-            if self.blockchain.get_balance(self.wallet.get_public_address()) < amount:
-                messagebox.showerror("Gagal", "Saldo terkonfirmasi tidak mencukupi."); return
-            
-            canonical_amount_str = "{:.8f}".format(amount)
-            tx_data = {'sender': self.wallet.get_public_address(), 'recipient': recipient, 'amount': canonical_amount_str}
-            signature = self.wallet.sign_transaction(tx_data)
-            added_tx = self.blockchain.add_transaction(self.wallet.get_public_address(), recipient, amount, signature, self.wallet.public_key.export_key().decode('utf-8'))
+            my_address = self.wallet.get_public_address()
+            fee = P.MIN_TX_FEE
+            if self.blockchain.get_balance(my_address) < amount + fee:
+                messagebox.showerror("Gagal", "Saldo terkonfirmasi tidak mencukupi (termasuk fee)."); return
+
+            # v2: nonce/fee/timestamp ditandatangani, mencegah replay.
+            nonce = self.blockchain.get_next_nonce(my_address)
+            signed_tx = self.wallet.build_transaction(recipient, amount, fee, nonce)
+            added_tx = self.blockchain.submit_transaction(signed_tx)
             if added_tx:
-                self.node.broadcast_message('NEW_TRANSACTION', {'transaction': added_tx, 'public_key_str': self.wallet.public_key.export_key().decode('utf-8')})
+                self.node.broadcast_message('NEW_TRANSACTION', {'transaction': added_tx, 'public_key_str': added_tx['public_key_str']})
                 messagebox.showinfo("Sukses", "Transaksi berhasil disiarkan.")
             else: messagebox.showerror("Gagal", "Gagal membuat transaksi.")
 

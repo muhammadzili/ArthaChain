@@ -1,0 +1,28 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- Data runtime & rahasia JANGAN pernah di-commit ---
+*.dat
+wallet.dat
+blockchain.json
+blockchain.json.bak-*
+peers.json
+logs/
+*.log
+_diag*.json
+test_*.json
+
+# --- Sub-proyek yang tidak dibawa ---
+artha_wallet/
+artha-pool/
+artha-wallet/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

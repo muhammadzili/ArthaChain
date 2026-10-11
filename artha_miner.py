@@ -9,6 +9,7 @@ import threading
 from artha_blockchain import ArthaBlockchain
 from artha_wallet import ArthaWallet
 from artha_node import ArthaNode
+import artha_protocol as P
 
 MINER_HOST = '0.0.0.0'
 MINER_PORT = 5001
@@ -57,7 +58,10 @@ def mining_worker(blockchain, node, miner_address, new_tx_event):
             time.sleep(2)
             continue
 
-        triggered = new_tx_event.wait(timeout=blockchain.TARGET_BLOCK_TIME_SECONDS)
+        # Block time mengikuti jadwal pada tinggi berikutnya (60s pra-aktivasi,
+        # 180s sejak v2), bukan konstanta tetap, agar konsisten dengan difficulty.
+        next_height = blockchain.get_current_block_height() + 1
+        triggered = new_tx_event.wait(timeout=P.target_block_time(next_height))
         if triggered: logging.debug("New transaction detected! Triggering mining...")
         else: logging.debug("Timeout reached. Mining a block...")
 
@@ -90,7 +94,7 @@ def run_miner():
     node.start()
     
     logging.info(f"\nPENAMBANG HYBRID DIMULAI\nAlamat: {miner_address}\nNode di: {MINER_HOST}:{port}")
-    logging.info(f"Menambang setiap ada transaksi ATAU setiap ~{blockchain.TARGET_BLOCK_TIME_SECONDS} detik.")
+    logging.info(f"Menambang setiap ada transaksi ATAU sesuai target block time ({P.TARGET_BLOCK_TIME_V2}s sejak v2).")
     
     miner_thread = threading.Thread(target=mining_worker, args=(blockchain, node, miner_address, new_tx_event), daemon=True)
     miner_thread.start()
