@@ -138,14 +138,15 @@ def sync_blockchain_with_animation(node, blockchain, min_wait=3):
     print(f"[⚡] Height lokal: {height} | Target Jaringan: {best} ({total_blocks_to_sync} blok tertinggal)")
     print("[🔄] Mengunduh dan memvalidasi blok...")
 
-    # Matikan sementara console logging agar tidak tercampur dengan animasi
+    # Matikan sementara INFO di console agar tidak tercampur dengan animasi.
+    # WARNING/ERROR TETAP tampil supaya blok yang ditolak kelihatan alasannya.
     root_logger = logging.getLogger()
     console_handlers = [
         h for h in root_logger.handlers
         if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
     ]
     for h in console_handlers:
-        h.setLevel(logging.CRITICAL)
+        h.setLevel(logging.WARNING)
 
     initial_height = height
     last_height = height

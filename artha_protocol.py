@@ -96,7 +96,7 @@ _PROFILE = NETWORKS[NETWORK]
 # --- identitas jaringan & versi ---
 CHAIN_ID = _PROFILE['chain_id']
 PROTOCOL_VERSION = 2
-NODE_VERSION = '2.4'          # versi rilis perangkat lunak (bukan versi protokol)
+NODE_VERSION = '2.5'          # versi rilis perangkat lunak (bukan versi protokol)
 
 # Folder data relatif terhadap ~/.artha_chain (kosong = root mainnet).
 DATA_SUBDIR = _PROFILE['data_subdir']
