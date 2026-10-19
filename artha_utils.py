@@ -3,8 +3,11 @@
 import hashlib
 import json
 import os
+import threading
 import logging
 from decimal import Decimal
+
+import artha_protocol as P
 
 logger = logging.getLogger(__name__)
 
@@ -45,20 +48,39 @@ def json_serialize(data):
 def get_data_dir():
     """
     Returns the data directory path for ArthaChain.
+
+    Prioritas:
+      1. ARTHA_DATADIR  -> override penuh (untuk menjalankan banyak instance
+         di satu PC tanpa bentrok file chain).
+      2. ~/.artha_chain/<subdir jaringan>  (mainnet = tanpa subdir).
     """
-    home_dir = os.path.expanduser("~")
-    artha_dir = os.path.join(home_dir, ".artha_chain")
+    override = os.environ.get('ARTHA_DATADIR')
+    if override:
+        artha_dir = os.path.expanduser(override)
+    else:
+        artha_dir = os.path.join(os.path.expanduser("~"), ".artha_chain")
+        sub = getattr(P, 'DATA_SUBDIR', '')
+        if sub:
+            artha_dir = os.path.join(artha_dir, sub)
     os.makedirs(artha_dir, exist_ok=True)
     return artha_dir
 
 def save_json_file(filename, data):
     """
-    Saves Python data to a JSON file.
+    Saves Python data to a JSON file atomically.
+
+    Pakai nama file sementara unik per panggilan: dua thread yang save
+    barengan dulu berebut satu file .tmp yang sama, sehingga os.replace
+    di thread kedua gagal "No such file or directory".
     """
     filepath = os.path.join(get_data_dir(), filename)
-    with open(filepath, 'w') as f:
-        json.dump(data, f, indent=4, cls=DecimalEncoder)
-    logger.debug(f"File '{filename}' successfully saved.") 
+    tmp_path = f'{filepath}.{os.getpid()}.{threading.get_ident()}.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, cls=DecimalEncoder, separators=(',', ':'))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, filepath)
+    logger.debug(f"File '{filename}' successfully saved.")
 
 def load_json_file(filename):
     """

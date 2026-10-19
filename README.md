@@ -100,6 +100,41 @@ python3 arthacore_gui.py 5002
 
 ---
 
+## 🌐 Jaringan: mainnet / devnet / localnet
+
+Pilih jaringan lewat env `ARTHA_NETWORK` (default: `mainnet`). Setiap jaringan
+punya `chain_id`, folder data, port, dan parameter konsensus sendiri sehingga
+tidak saling silang antar jaringan.
+
+| Jaringan  | chain_id          | Data dir (di `~/.artha_chain`) | Port default (miner/app/gui) |
+|-----------|-------------------|--------------------------------|------------------------------|
+| mainnet   | arthachain-1      | `(root)`                       | 5001 / 5000 / 5002           |
+| devnet    | arthachain-devnet | `devnet/`                      | 6001 / 6000 / 6002           |
+| localnet  | arthachain-local  | `localnet/`                    | 7001 / 7000 / 7002           |
+
+`devnet` = blok ~15 detik, `localnet` = ~5 detik (untuk simulasi kilat).
+`devnet`/`localnet` memakai bootstrap lokal, bukan discovery publik mainnet.
+
+Contoh menjalankan 5 node/wallet di 1 PC (devnet) — tiap instance pakai
+`ARTHA_DATADIR` sendiri supaya bisa saling sinkron via P2P:
+
+```bash
+# Terminal 1 - Miner (penghasil blok)
+ARTHA_NETWORK=devnet ARTHA_DATADIR=~/.artha_dev/1 python3 artha_miner.py 6001
+
+# Terminal 2-5 - Wallet/node, hubungkan ke miner lewat menu "Tambah Peer"
+ARTHA_NETWORK=devnet ARTHA_DATADIR=~/.artha_dev/2 python3 artha_app.py 6101
+ARTHA_NETWORK=devnet ARTHA_DATADIR=~/.artha_dev/3 python3 artha_app.py 6102
+# dst...
+```
+
+PowerShell (Windows):
+```powershell
+$env:ARTHA_NETWORK="devnet"; $env:ARTHA_DATADIR="$HOME\.artha_dev\1"; python artha_miner.py 6001
+```
+
+---
+
 ## 💸 Transaksi Real-Time
 
 1. Setelah penambangan berjalan, wallet miner akan menerima reward ARTH.

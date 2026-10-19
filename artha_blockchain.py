@@ -44,6 +44,9 @@ class ArthaBlockchain:
         # Cached (balances, total_issued, total_work, nonces) folded over
         # self.chain so lookups do not rescan every block.
         self._state_cache = None
+        # id transaksi non-coinbase yang sudah confirmed, agar submit_transaction
+        # tidak menghash ulang seluruh chain setiap ada tx baru masuk mempool.
+        self._confirmed_tx_ids = set()
         self.max_reorg_depth = max_reorg_depth
         self._load_or_create_chain()
 
@@ -97,6 +100,7 @@ class ArthaBlockchain:
     def _warm_cache(self):
         """Fold the whole chain into (balances, total_issued, total_work, nonces)."""
         balances, total_issued, total_work, nonces = {}, Decimal('0'), 0, {}
+        confirmed_ids = set()
         for block in self.chain:
             total_work += self._block_work(block)
             for tx in block.get('transactions', []):
@@ -107,6 +111,7 @@ class ArthaBlockchain:
                 sender = tx.get('sender')
                 recipient = tx.get('recipient')
                 if sender != '0':
+                    confirmed_ids.add(self._calculate_transaction_id(tx))
                     fee = Decimal(tx['fee']) if 'fee' in tx else Decimal('0')
                     balances[sender] = balances.get(sender, Decimal('0')) - amount - fee
                     balances[recipient] = balances.get(recipient, Decimal('0')) + amount
@@ -122,6 +127,15 @@ class ArthaBlockchain:
                     reported = tx.get('block_reward')
                     total_issued += Decimal(reported) if reported is not None else amount
         self._state_cache = (balances, total_issued, total_work, nonces)
+        self._confirmed_tx_ids = confirmed_ids
+
+    def _reindex_confirmed_tx_ids(self):
+        self._confirmed_tx_ids = {
+            self._calculate_transaction_id(tx)
+            for block in self.chain
+            for tx in block.get('transactions', [])
+            if tx.get('sender') != '0'
+        }
 
     def get_total_issued(self):
         with self.chain_lock:
@@ -461,12 +475,7 @@ class ArthaBlockchain:
             if tx_id in self.known_pending_tx_hashes:
                 return None
 
-            confirmed_ids = {
-                self._calculate_transaction_id(t)
-                for block in self.chain for t in block.get('transactions', [])
-                if t.get('sender') != '0'
-            }
-            if tx_id in confirmed_ids:
+            if tx_id in self._confirmed_tx_ids:
                 return None
 
             if len(self.pending_transactions) >= P.MAX_MEMPOOL_TXS:
@@ -634,8 +643,13 @@ class ArthaBlockchain:
                     ):
                         return False, f'invalid transaction signature at block {i}', None
                     tx_ts = tx.get('timestamp', 0)
-                    if tx_ts > now + P.MAX_FUTURE_DRIFT or tx_ts < now - P.MAX_PAST_DRIFT:
-                        return False, f'transaction timestamp out of range at block {i}', None
+                    # Hanya cek future-drift di sini. Cek past-drift (umur tx)
+                    # boleh dilakukan saat tx MASUK mempool (submit_transaction),
+                    # tetapi TIDAK boleh di validasi historis: kalau tidak, chain
+                    # yang berisi tx tua (> MAX_PAST_DRIFT) jadi "invalid" begitu
+                    # file di-copy ke VPS lain atau node di-restart setelah seminggu.
+                    if tx_ts > now + P.MAX_FUTURE_DRIFT:
+                        return False, f'transaction timestamp too far in future at block {i}', None
 
                     txid = self._calculate_transaction_id(tx)
                     if txid in seen_tx_in_block:
@@ -684,11 +698,24 @@ class ArthaBlockchain:
     # Chain mutation
     # ------------------------------------------------------------------
 
-    def add_block(self, block):
-        """Validate and append a single block that extends the tip."""
+    def add_block(self, block, persist=True):
+        """
+        Validate and append a single block that extends the tip.
+
+        persist=False dipakai catch-up batch: caller yang menyimpan chain
+        sekali di akhir batch, supaya sinkronisasi tidak menulis ulang seluruh
+        file chain untuk tiap blok yang diterima.
+        """
         with self.chain_lock:
             last_block = self.last_block
             if not last_block or block.get('previous_hash') != self.hash_block(last_block):
+                logger.warning(
+                    f'Rejected block #{block.get("index")}: previous_hash tidak cocok '
+                    f'(local tip #{self.get_current_block_height()}, '
+                    f'block.previous_hash={str(block.get("previous_hash"))[:16]}..., '
+                    f'local_tip_hash={self.hash_block(last_block)[:16]}...)'
+                    if last_block else 'Rejected block: no local tip'
+                )
                 return False
 
             if self._state_cache is None:
@@ -704,24 +731,39 @@ class ArthaBlockchain:
 
             self.chain = candidate
             self._state_cache = state
-            self._drop_confirmed_transactions()
-            self.save_chain()
+            for tx in block.get('transactions', []):
+                if tx.get('sender') != '0':
+                    self._confirmed_tx_ids.add(self._calculate_transaction_id(tx))
+            self._drop_confirmed_transactions([block])
+            if persist:
+                self.save_chain()
             logger.debug(f'Block #{block["index"]} appended. Height: {len(self.chain) - 1}')
             return True
 
-    def _drop_confirmed_transactions(self):
-        confirmed_ids = {
-            self._calculate_transaction_id(tx)
-            for block in self.chain for tx in block.get('transactions', [])
-            if tx.get('sender') != '0'
-        }
-        self.pending_transactions = [
+    def _drop_confirmed_transactions(self, new_blocks=None):
+        """
+        Buang tx dari mempool yang sudah masuk chain.
+
+        new_blocks=None : scan seluruh chain (dipakai replace/reorg, jarang).
+        new_blocks=[b]  : cukup blok yang baru masuk (dipakai add_block).
+        """
+        blocks = self.chain if new_blocks is None else new_blocks
+        confirmed_ids = set()
+        for block in blocks:
+            for tx in block.get('transactions', []):
+                if tx.get('sender') != '0':
+                    confirmed_ids.add(self._calculate_transaction_id(tx))
+        if not confirmed_ids:
+            return
+        remaining = [
             tx for tx in self.pending_transactions
             if self._calculate_transaction_id(tx) not in confirmed_ids
         ]
-        self.known_pending_tx_hashes = {
-            self._calculate_transaction_id(tx) for tx in self.pending_transactions
-        }
+        if len(remaining) != len(self.pending_transactions):
+            self.pending_transactions = remaining
+            self.known_pending_tx_hashes = {
+                self._calculate_transaction_id(tx) for tx in remaining
+            }
 
     def _outranks_current(self, new_chain):
         """Longer wins; ties broken by total work, then tip hash (deterministic)."""
@@ -778,8 +820,15 @@ class ArthaBlockchain:
         except Exception as e:
             logger.warning(f'Failed to restore orphaned transactions: {e}')
 
-    def replace_chain(self, new_chain):
-        """Adopt a chain received from a peer when it outranks ours."""
+    def replace_chain(self, new_chain, force=False):
+        """
+        Adopt a chain received from a peer when it outranks ours.
+
+        force=True dipakai saat mengadopsi genesis peer pada node fresh
+        (height 0, genesis lokal buatan sendiri yang ternyata beda dengan
+        jaringan). Saat itu chain lokal tidak "kalah" secara panjang, tapi
+        tetap harus diganti supaya blok berikutnya bisa nyambung.
+        """
         with self.chain_lock:
             if not new_chain:
                 return False
@@ -791,7 +840,7 @@ class ArthaBlockchain:
                 logger.warning(f'Rejecting deep reorg attempt: depth {reorg_depth} > max {self.max_reorg_depth}')
                 return False
 
-            if not self._outranks_current(new_chain):
+            if not force and not self._outranks_current(new_chain):
                 logger.debug(
                     f'Ignored non-winning chain from peer: '
                     f'{len(new_chain) - 1} blocks, work {self._compute_work(new_chain)}'
@@ -806,6 +855,7 @@ class ArthaBlockchain:
 
             self.chain = new_chain
             self._state_cache = state
+            self._reindex_confirmed_tx_ids()
             self._drop_confirmed_transactions()
             self._restore_orphaned_transactions(old_chain, self.chain)
             self.save_chain()
@@ -828,6 +878,7 @@ class ArthaBlockchain:
                 return False
             self.chain = new_chain
             self._state_cache = state
+            self._reindex_confirmed_tx_ids()
             self._drop_confirmed_transactions()
             self._restore_orphaned_transactions(old_chain, self.chain)
             self.save_chain()

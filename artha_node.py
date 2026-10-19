@@ -15,7 +15,7 @@ import artha_protocol as P
 logger = logging.getLogger(__name__)
 
 # Configuration
-GIST_URL = "https://gist.githubusercontent.com/muhammadzili/19fbb07822977ada20ef98cd3e5638c4/raw/c2e47995f7867427bf46a1bb1a3494ebea27a450/node.json"
+GIST_URL = P.GIST_URL  # None untuk devnet/localnet (tanpa discovery publik)
 PEER_UPDATE_INTERVAL = 3600  # 1 hour in seconds
 HEARTBEAT_INTERVAL = 20  # send a PING this often to keep links alive
 PEER_TIMEOUT = 75  # drop a peer after 3 missed heartbeats
@@ -55,7 +55,7 @@ class ArthaNode:
         self.new_tx_event = new_tx_event
         self.message_queue = Queue()
         self.last_peer_update = 0
-        self.bootstrap_peers = []
+        self.bootstrap_peers = list(P.BOOTSTRAP_PEERS)
         # What each peer told us to dial it on, keyed by our connection key. An
         # inbound socket arrives from an ephemeral port, which nobody can dial.
         self._peer_advertised = {}
@@ -73,6 +73,10 @@ class ArthaNode:
         self._last_block_request = 0.0
         self._last_escalation = 0.0
         self._last_peer_share = 0.0
+        # Saat genesis lokal diganti punya peer (node fresh ketemu jaringan
+        # dengan genesis berbeda), batch blok pertama harus replace chain,
+        # bukan add_block biasa.
+        self._pending_genesis_adoption = None
 
         self._index_known_blocks()
 
@@ -304,7 +308,17 @@ class ArthaNode:
         return candidates
 
     def _fetch_peer_list(self):
-        """Fetch the latest peer list from GitHub Gist"""
+        """
+        Ambil daftar peer bootstrap.
+
+        mainnet menarik daftar dari Gist; devnet/localnet tidak (isolasi), cukup
+        pakai peer lokal dari profil jaringan.
+        """
+        if not P.DISCOVERY_ENABLED or not GIST_URL:
+            with self.lock:
+                if not self.bootstrap_peers:
+                    self.bootstrap_peers = list(P.BOOTSTRAP_PEERS)
+            return True
         try:
             with urllib.request.urlopen(GIST_URL, timeout=5) as response:
                 data = json.loads(response.read().decode('utf-8'))
@@ -321,7 +335,7 @@ class ArthaNode:
             logger.warning(f"Failed to fetch peer list: {e}")
             with self.lock:
                 if not self.bootstrap_peers:
-                    self.bootstrap_peers = ['127.0.0.1:5001']
+                    self.bootstrap_peers = list(P.BOOTSTRAP_PEERS) or [f'127.0.0.1:{P.DEFAULT_MINER_PORT}']
             return False
 
     def _peer_update_loop(self):
@@ -641,11 +655,13 @@ class ArthaNode:
     def _send_hello(self, peer_address):
         """Tell a peer the address it can reach us on, plus our network identity."""
         try:
+            summary = self._chain_summary()
             self.send_message(peer_address, 'HELLO', {
                 'address': self.advertised_address,
-                'height': self.blockchain.get_current_block_height(),
+                'height': summary['height'],
                 'chain_id': P.CHAIN_ID,
                 'protocol_version': P.PROTOCOL_VERSION,
+                'genesis': summary.get('genesis'),
             })
         except Exception as e:
             logger.debug(f'Could not send HELLO to {peer_address}: {e}')
@@ -671,6 +687,24 @@ class ArthaNode:
         if isinstance(peer_h, int):
             self._update_peer_height(sender_peer_address, peer_h)
 
+        # Genesis berbeda + kita masih height 0: adopsi genesis peer.
+        peer_genesis = data.get('genesis')
+        if (
+            peer_genesis and self.blockchain.get_current_block_height() == 0
+            and len(self.blockchain.chain) == 1
+            and not self._has_user_history()
+        ):
+            local_genesis = None
+            with self.blockchain.chain_lock:
+                if self.blockchain.chain:
+                    local_genesis = self.blockchain.hash_block(self.blockchain.chain[0])
+            if local_genesis and peer_genesis != local_genesis:
+                logger.warning(
+                    f'HELLO dari {sender_peer_address}: genesis beda. '
+                    f'Mengadopsi genesis peer.'
+                )
+                self._adopt_peer_genesis(sender_peer_address)
+
         advertised = self._normalize_peer(data.get('address'))
         if not advertised or advertised == sender_peer_address:
             return
@@ -692,17 +726,40 @@ class ArthaNode:
         logger.debug(f'Peer {sender_peer_address} is reachable at {advertised}.')
 
     def _chain_summary(self):
-        """Height plus tip hash, so peers can spot lag and forks from a heartbeat."""
+        """Height, tip hash, dan genesis hash supaya peer bisa deteksi fork/jaringan beda."""
         with self.blockchain.chain_lock:
             last = self.blockchain.last_block
             height = self.blockchain.get_current_block_height()
             tip = self.blockchain.hash_block(last) if last else None
-        return {'height': height, 'tip': tip}
+            genesis = self.blockchain.chain[0] if self.blockchain.chain else None
+            genesis_hash = self.blockchain.hash_block(genesis) if genesis else None
+        return {'height': height, 'tip': tip, 'genesis': genesis_hash}
 
     def _handle_pong(self, data, sender_peer_address):
         """React to a heartbeat: catch up if the peer is ahead, fork-check if not."""
         peer_height = data.get('height')
         height = self.blockchain.get_current_block_height()
+
+        # Genesis hash dari peer. Kalau kita masih height 0 (genesis buatan
+        # lokal) dan genesis peer beda, semua blok peer akan ditolak
+        # previous_hash mismatch selamanya. Adopsi genesis peer dulu.
+        peer_genesis = data.get('genesis')
+        if (
+            peer_genesis and height == 0
+            and len(self.blockchain.chain) == 1
+            and not self._has_user_history()
+        ):
+            local_genesis = None
+            with self.blockchain.chain_lock:
+                if self.blockchain.chain:
+                    local_genesis = self.blockchain.hash_block(self.blockchain.chain[0])
+            if local_genesis and peer_genesis != local_genesis:
+                logger.warning(
+                    f'Genesis lokal berbeda dari peer {sender_peer_address}. '
+                    f'Mengadopsi genesis peer agar sinkronisasi bisa jalan.'
+                )
+                self._adopt_peer_genesis(sender_peer_address)
+                return
 
         if isinstance(peer_height, int):
             self._update_peer_height(sender_peer_address, peer_height)
@@ -720,6 +777,35 @@ class ArthaNode:
                     f'PeerReports a different tip at height {height} (fork). Comparing chains.'
                 )
                 self._escalate_sync(sender_peer_address)
+
+    def _has_user_history(self):
+        """True bila chain lokal sudah berisi blok ber-muatan (bukan cuma genesis kosong)."""
+        with self.blockchain.chain_lock:
+            for block in self.blockchain.chain:
+                if block.get('transactions'):
+                    return True
+        return False
+
+    def _adopt_peer_genesis(self, peer_address):
+        """
+        Ganti genesis lokal dengan genesis peer, lalu tarik blok pertama.
+
+        Dipakai saat node fresh (height 0, genesis buatan sendiri) bertemu
+        jaringan yang genesis-nya berbeda. Tanpa ini semua blok ditolak
+        previous_hash mismatch dan sinkronisasi mandek di 0%.
+        """
+        with self.blockchain.chain_lock:
+            local_genesis_hash = (
+                self.blockchain.hash_block(self.blockchain.chain[0])
+                if self.blockchain.chain else None
+            )
+        # Minta blok dari index 0 (termasuk genesis peer).
+        self.send_message(peer_address, 'GET_BLOCKS', {'from_index': 0})
+        # tandai bahwa kita perlu adopt genesis dari batch berikutnya
+        self._pending_genesis_adoption = {
+            'peer': peer_address,
+            'local_genesis': local_genesis_hash,
+        }
 
     def _handle_new_transaction(self, tx_data, sender_peer_address):
         """
@@ -814,6 +900,31 @@ class ArthaNode:
         if isinstance(peer_height, int) and sender:
             self._update_peer_height(sender, peer_height)
 
+        # Node fresh yang genesis-nya diganti: batch pertama (dari index 0)
+        # harus mengganti seluruh chain lokal, bukan add_block biasa.
+        adoption = self._pending_genesis_adoption
+        if adoption:
+            if blocks and blocks[0].get('index') == 0:
+                self._pending_genesis_adoption = None
+                chain = list(blocks)
+                # force=True: genesis lokal (buatan sendiri) memang harus diganti
+                # walau chain peer belum tentu lebih panjang di batch pertama.
+                if self.blockchain.replace_chain(chain, force=True):
+                    self._index_known_blocks()
+                    logger.info(
+                        f'Genesis peer diterima. Chain lokal diganti, height: '
+                        f'{self.blockchain.get_current_block_height()}'
+                    )
+                    height = self.blockchain.get_current_block_height()
+                    if peer_height and isinstance(peer_height, int) and peer_height > height:
+                        self.request_blocks(height + 1, force=True)
+                else:
+                    logger.warning('Gagal mengadopsi genesis peer (validasi chain ditolak).')
+                return
+            # Respons tidak berisi genesis: buang state adopsi supaya tidak
+            # nyangkut, lalu proses batch secara normal.
+            self._pending_genesis_adoption = None
+
         if not blocks:
             height = self.blockchain.get_current_block_height()
             if height < self.best_known_height and sender:
@@ -821,24 +932,82 @@ class ArthaNode:
                 self.request_blocks(height + 1, exclude_peer=sender, force=True)
             return
 
-        added = 0
+        # Terapkan seluruh batch dulu tanpa save per blok dan tanpa relay
+        # per blok: menyimpan + menyiarkan tiap blok catch-up membuat I/O
+        # dan traffic meledak (16MB chain x ratusan blok = stuck kelihatan).
+        added_blocks = []
         for block in blocks:
             if self._has_block(block):
                 continue
-            if not self.handle_new_block(block):
+            height = self.blockchain.get_current_block_height()
+            if block.get('index') != height + 1:
+                if block.get('index', 0) > height + 1:
+                    logger.debug(
+                        f'Gap detected: have #{height}, got #{block.get("index")}. Requesting catch-up.'
+                    )
+                    if added_blocks:
+                        self.blockchain.save_chain()
+                        self._finish_catchup(added_blocks, sender)
+                    self.request_blocks(height + 1)
+                else:
+                    logger.debug(
+                        f'Block #{block.get("index")} from a competing branch '
+                        f'(local tip #{height}). Resolving fork.'
+                    )
+                    if added_blocks:
+                        self.blockchain.save_chain()
+                        self._finish_catchup(added_blocks, sender)
+                    self._escalate_sync(sender)
+                return
+            if not self.blockchain.add_block(block, persist=False):
+                # Kasus khas node fresh: height 0, blok #1 ditolak karena
+                # previous_hash tidak nyambung ke genesis lokal. Peer lama
+                # tidak mengirim field genesis di HELLO/PING, jadi deteksi
+                # adopsi genesis harus reaktif dari sini: minta blok dari
+                # index 0 lalu ganti seluruh chain.
+                if (
+                    block.get('index') == 1
+                    and self.blockchain.get_current_block_height() == 0
+                    and len(self.blockchain.chain) == 1
+                ):
+                    local_gen = self.blockchain.hash_block(self.blockchain.chain[0])
+                    if block.get('previous_hash') != local_gen:
+                        logger.warning(
+                            f'Genesis lokal tidak cocok dengan jaringan '
+                            f'(local={local_gen[:16]}..., peer={str(block.get("previous_hash"))[:16]}...). '
+                            f'Mengadopsi genesis dari peer {sender}.'
+                        )
+                        self._adopt_peer_genesis(sender)
+                        return
+                if added_blocks:
+                    self.blockchain.save_chain()
+                    self._finish_catchup(added_blocks, sender)
                 # This block does not extend our tip: our branch and the peer's
                 # genuinely differ, so compare whole chains instead of looping.
                 self._escalate_sync(sender)
                 return
-            added += 1
-            self.broadcast_message('NEW_BLOCK', {'block': block}, exclude_peer=sender)
+            self._remember_block(block)
+            added_blocks.append(block)
 
-        if added > 0:
-            height = self.blockchain.get_current_block_height()
-            logger.debug(f'Catch-up applied {added} block(s). Height: {height}')
-            # Still behind? Keep pulling until caught up.
-            if self.best_known_height > height:
-                self.request_blocks(height + 1, force=True)
+        if not added_blocks:
+            return
+
+        self.blockchain.save_chain()
+        self._finish_catchup(added_blocks, sender)
+
+    def _finish_catchup(self, added_blocks, sender):
+        """
+        Setelah batch catch-up: update tinggi, relay HANYA blok terakhir,
+        lalu tarik batch berikutnya kalau masih tertinggal.
+        """
+        height = self.blockchain.get_current_block_height()
+        if self.best_known_height < height:
+            self.best_known_height = height
+        logger.debug(f'Catch-up applied {len(added_blocks)} block(s). Height: {height}')
+        # Relay tip saja; peer lain bisa catch-up lewat GET_BLOCKS sendiri.
+        self.broadcast_message('NEW_BLOCK', {'block': added_blocks[-1]}, exclude_peer=sender)
+        if self.best_known_height > height:
+            self.request_blocks(height + 1, force=True)
 
     def _handle_chain_response(self, data, sender_peer_address=None):
         chain = data.get('chain')
